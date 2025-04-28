@@ -3,11 +3,15 @@ import base64
 import json
 from PIL import Image, ImageEnhance
 import requests, io
-from time import sleep
-DEBUG = False
+from pathlib import Path
+import numpy as np
+
+DEBUG = True
+
+MATRIX_WIDTH = 32
+MATRIX_HEIGHT = 32
 
 def debug(s):
-    global DEBUG
     if DEBUG:
         print(s)
 def set_rgb_color(color):
@@ -21,38 +25,61 @@ def set_rgb_color(color):
     debug(response.text)
 def is_blk_white(rgb):
     r, g, b = rgb
-    return (r <= 10 and g <= 10 and b <= 10) or (r >= 245 and g >= 245 and b >= 245)
-def save_and_send_image(ext):
+    brightness = (r + g + b) / 3
+    color_spread = max(r, g, b) - min(r, g, b)
+    
+    return (brightness < 30) or (brightness > 220 and color_spread < 20)
+def save_and_send_image(name):
     url = "http://matrix.lan/icon.bmp"
     color = None
-    img = Image.open(f"curr-song{ext}").resize((32,32), Image.LANCZOS).convert('RGB')
-
-        # search for non black and white colors
-    for y in range(32):
-        for x in range(32):
-            r,g,b = img.getpixel((x,y))
-            debug(f"Checking pixel ({x},{y}): ({r},{g},{b})")
-            if not is_blk_white((r,g,b)):
-                debug(f"Found non-B/W pixel: ({r},{g},{b})")
-                sleep(3)
-                color = f'#{r:02x}{g:02x}{b:02x}'
-                break
-        else:
-            continue
-        break
+    img = Image.open(name).resize((MATRIX_WIDTH,MATRIX_HEIGHT), Image.LANCZOS).convert('RGB')
+    
+    # reduce image brightness and saturate it first using pillow library
+    enhancer = ImageEnhance.Color(img)
+    img = enhancer.enhance(1.5)
 
     enhancer = ImageEnhance.Brightness(img)
     img = enhancer.enhance(0.5)
-    img_bytes = img.tobytes()
 
-    debug(f"Image size: {len(img_bytes)} bytes")
-    response = requests.post(url, data=img_bytes)
+    # conver to numpy array for faster processing
+    np_img = np.array(img)
+
+    found = False
+
+        # search for non black and white colors
+    for y in range(MATRIX_WIDTH):
+        for x in range(MATRIX_HEIGHT):
+            r,g,b = np_img[y,x]
+            debug(f"Checking pixel ({x},{y}): ({r},{g},{b})")
+            if not is_blk_white((r,g,b)):
+                debug(f"Found non-B/W pixel: ({r},{g},{b})")
+                color = f'#{r:02x}{g:02x}{b:02x}'
+                found = True
+                break
+        if found:
+            break
+            
+
+    # casting numpy array before shifting to prevent overflow errors
+    r = np_img[:, :, 0].astype(np.uint16) & 0xF8
+    g = np_img[:, :, 1].astype(np.uint16) & 0xFC
+    b = np_img[:, :, 2].astype(np.uint16) >> 3
+    rgb565 = (r << 8) | (g << 3) | b
+
+    # Flatten to byte array: high byte first, low byte second
+    img_rgb565 = bytearray()
+    for val in rgb565.flatten():
+        img_rgb565.append((val >> 8) & 0xFF)  # high byte
+        img_rgb565.append(val & 0xFF)         # low byte
+
+    debug(f"Image size: {len(img_rgb565)} bytes")
+    response = requests.post(url, data=img_rgb565)
+
     if color:
         set_rgb_color(color)
     else:
         debug("Unable to determine color, setting to default color: #FF0000 (red)")
         set_rgb_color("#FF0000")
-
 
     print(f"Status: {response.status_code}")
     debug(f"Response: {response.text}")
@@ -151,8 +178,8 @@ if __name__ == "__main__":
             metadata = {}
             print(json.dumps({}))
             sys.stdout.flush()
-            # clear_artwork()
-            # enable_rgb(False)
+            clear_artwork()
+            enable_rgb(False)
         if (typ == "ssnc" and code == "pend"):
             metadata = {}
             print(json.dumps({}))
@@ -164,26 +191,26 @@ if __name__ == "__main__":
         if (typ == "ssnc" and code == "pbeg"):
             metadata['pause'] = False
         if (typ == "ssnc" and code == "PICT"):
-            if (len(data) == 0):
-                clear_artwork()
-                enable_rgb(False)
-                print(json.dumps({"image": ""}))
-            else:
-                mime = guessImageMime(data)
-                extension = {
-                    'image/jpeg': '.jpg',
-                    'image/png': '.png'
-                }.get(mime, '.jpg')  # Default to .jpg
-                if DEBUG:
-                    filename = "curr-song" + extension
-                    with open(filename, "wb") as img_file:
-                        img_file.write(data)
-                save_and_send_image(extension)
-                enable_rgb(True)
-                # to print the base 64 code along with the image type print (json.dumps({"image": "data:" + mime + ";base64," + base64.b64encode(data).decode()}))
-                print (json.dumps({"image": "data:" + mime}))
-                
-            sys.stdout.flush()
+                    if (len(data) == 0):
+                        clear_artwork()
+                        enable_rgb(False)
+                        print(json.dumps({"image": ""}))
+                    else:
+                        mime = guessImageMime(data)
+                        extension = {
+                            'image/jpeg': '.jpg',
+                            'image/png': '.png'
+                        }.get(mime, '.jpg')  # Default to .jpg
+                        
+                        filename = "curr-song" + extension
+                        with open(filename, "wb") as img_file:
+                            img_file.write(data)
+                        save_and_send_image(filename)
+                        enable_rgb(True)
+                        # to print the base 64 code along with the image type print (json.dumps({"image": "data:" + mime + ";base64," + base64.b64encode(data).decode()}))
+                        print (json.dumps({"image": "data:" + mime}))
+                        
+                    sys.stdout.flush()
         # track changed
         if (typ == "ssnc" and code == "mden"):
             print(json.dumps(metadata))
