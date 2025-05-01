@@ -29,17 +29,42 @@ def is_blk_white(rgb):
     color_spread = max(r, g, b) - min(r, g, b)
     
     return (brightness < 30) or (brightness > 220 and color_spread < 20)
+def floyd_steinberg_dither(img_np, color_depth_bits):
+    """Apply Floyd–Steinberg dithering to RGB image with specified per-channel bit depth"""
+    height, width, _ = img_np.shape
+    out = img_np.astype(np.float32)
+
+    max_val = 2**color_depth_bits - 1
+
+    def quantize(val):
+        return round(val * max_val / 255) * (255 / max_val)
+
+    for y in range(height):
+        for x in range(width):
+            old_pixel = out[y, x].copy()
+            new_pixel = np.array([quantize(c) for c in old_pixel])
+            out[y, x] = new_pixel
+            quant_error = old_pixel - new_pixel
+
+            if x + 1 < width:
+                out[y, x + 1] += quant_error * 7 / 16
+            if y + 1 < height:
+                if x > 0:
+                    out[y + 1, x - 1] += quant_error * 3 / 16
+                out[y + 1, x] += quant_error * 5 / 16
+                if x + 1 < width:
+                    out[y + 1, x + 1] += quant_error * 1 / 16
+
+    return np.clip(out, 0, 255).astype(np.uint8)
 def save_and_send_image(name):
     url = "http://matrix.lan/icon.bmp"
     color = None
     img = Image.open(name).resize((MATRIX_WIDTH,MATRIX_HEIGHT), Image.LANCZOS).convert('RGB')
     
     # reduce image brightness and saturate it first using pillow library
-    enhancer = ImageEnhance.Color(img)
-    img = enhancer.enhance(1.5)
-
-    enhancer = ImageEnhance.Brightness(img)
-    img = enhancer.enhance(0.5)
+    img = ImageEnhance.Color(img).enhance(1.5)
+    img = ImageEnhance.Brightness(img).enhance(0.4)
+    img = ImageEnhance.Contrast(img).enhance(1.5)
 
     # conver to numpy array for faster processing
     np_img = np.array(img)
@@ -58,7 +83,10 @@ def save_and_send_image(name):
                 break
         if found:
             break
-            
+
+    
+    #np_img = ordered_dither(np_img, bit_depth=8)  # or 4 if using 4-bit
+    np_img = floyd_steinberg_dither(np_img, color_depth_bits=5)  # or 4
 
     # casting numpy array before shifting to prevent overflow errors
     r = np_img[:, :, 0].astype(np.uint16) & 0xF8
