@@ -3,3 +3,5 @@
 *.jpg
 *.jpeg
 *.png
+credentials.py
+output
