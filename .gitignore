@@ -6,3 +6,4 @@ __pycache__
 *.png
 credentials.py
 output
+config.yaml
