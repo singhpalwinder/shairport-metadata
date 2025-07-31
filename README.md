@@ -1,39 +1,43 @@
-# 🎵 Shairport Metadata Listener + LED Matrix Artwork Broadcaster
+# 🎵 Shairport Metadata to Matrix Dashboard Broadcaster
 
-This Python 3 script runs on a Raspberry Pi Zero 2W and integrates with [`shairport-sync`](https://github.com/mikebrady/shairport-sync) to extract, decode, and act on real-time media metadata. It enhances album artwork, displays it on an LED matrix, and changes Zigbee lights to match the music's color palette — all in real time.
+This Python 3 project runs on a Raspberry Pi Zero 2W and listens to [Shairport-Sync](https://github.com/mikebrady/shairport-sync) metadata output in real-time to extract and decode album artwork during AirPlay streaming. It then processes the image and sends it directly to a C++-based LED matrix dashboard running on an [Adafruit Matrix Portal S3](https://www.adafruit.com/product/5800).
 
-> 🔗 **Based on:** [surekap/MMM-ShairportMetadata](https://github.com/surekap/MMM-ShairportMetadata/blob/master/shairport-metadata.py)
+> 🚀 This project **broadcasts artwork to**:  
+> 👉 [`matrix-dashboard`](https://github.com/singhpalwinder/matrix-dashboard) — a C++ LED dashboard running on the Matrix Portal S3
 
 ---
 
 ## 📸 What It Does
 
-- **Extracts** base64-encoded album artwork and metadata from Shairport-Sync via a named pipe.
-- **Processes** the image:
-  - Resizes it to 32x32.
-  - Converts it to RGB565.
-  - Sends it to a remote LED Matrix (64x32) over TCP.
-- **Enhances ambience**:
-  - Uses K-Means clustering to extract dominant colors.
-  - Picks a color with the most variance for optimal lighting mood.
-  - Controls Zigbee lights via [Zigbee2MQTT](https://www.zigbee2mqtt.io/) integrated with Home Assistant.
-- **Handles edge cases** like monochrome images or missing metadata gracefully by defaulting to green.
+- **Listens to AirPlay metadata** using `shairport-sync` via a Unix named pipe.
+- **Processes album artwork**:
+  - Decodes base64-encoded image data.
+  - Resizes image to 32×32 pixels.
+  - Converts it to RGB565 byte stream.
+- **Sends artwork** to the Matrix Dashboard running C++ on the Matrix Portal S3 via TCP on port `9090`.
+- **Extracts dominant colors** using K-Means clustering and adjusts Zigbee-based smart lighting (via Home Assistant) to match the media's vibe.
 
 <p align="center">
   <img src="assets/matrix.JPG" alt="LED Matrix Artwork" width="256"/><br>
-  <i>Live artwork from AirPlay media on an LED matrix + room lights synced to the music's vibe</i>
+  <i>Live AirPlay artwork displayed on Matrix Portal S3 with smart light syncing</i>
 </p>
 
 ---
 
 ## 🧠 How It Works
 
-1. Listens to `/tmp/shairport-sync-metadata` for incoming XML metadata.
-2. Extracts `core` (album), `ssnc` (playback state), and `PICT` (album artwork).
-3. Detects new artwork via hashing.
-4. Saves the image to disk and sends it to:
-   - The matrix display at `matrix.lan:9090`
-   - A light control routine that sets Zigbee lighting color using `controlLights.py`
+1. `shairport-sync` writes now-playing metadata to `/tmp/shairport-sync-metadata`.
+2. This script parses the stream, looking for:
+   - `core/asal` → album name
+   - `ssnc/PICT` → embedded album artwork
+   - `ssnc/pbeg`/`prsm`/`prgr` → playback events
+3. Once a new image is detected:
+   - It's decoded and hashed to detect uniqueness
+   - Saved to disk
+   - Sent as raw RGB565 byte data over TCP to the Matrix Portal S3 (`matrix.lan:9090`)
+4. The Matrix Portal S3 C++ code receives and displays the image instantly.
+5. A K-Means color analysis selects the best ambient color for the room.
+6. Zigbee2MQTT + Home Assistant is used to update lighting based on dominant color tones.
 
 ---
 
@@ -41,9 +45,9 @@ This Python 3 script runs on a Raspberry Pi Zero 2W and integrates with [`shairp
 
 ```bash
 .
-├── shairport_metadata.py       # Main script 
+├── shairport-metadata.py       # Main script (runs on Pi Zero 2W)
 ├── utils/
-│   ├── imageProcessor.py       # Enhances image & extracts dominant color using KMeans
-│   └── controlLights.py        # Controls Home Assistant Zigbee lights via MQTT
+│   ├── imageProcessor.py       # Resizes image and computes top K-Means colors
+│   └── controlLights.py        # Sends color command to Home Assistant/MQTT
 ├── assets/
-│   └── matrix.JPG              # Example matrix output photo
+│   └── matrix.JPG              # Example image of the matrix dashboard
