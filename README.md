@@ -41,7 +41,7 @@ This Python 3 script runs on a Raspberry Pi Zero 2W and integrates with [`shairp
 
 ```bash
 .
-├── shairport_listener.py       # Main script (your current file)
+├── shairport_metadata.py       # Main script 
 ├── utils/
 │   ├── imageProcessor.py       # Enhances image & extracts dominant color using KMeans
 │   └── controlLights.py        # Controls Home Assistant Zigbee lights via MQTT
