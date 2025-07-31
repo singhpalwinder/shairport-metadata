@@ -1,6 +1,4 @@
-import requests, os
-
-os.rem
+import requests
 
 
 class Pironman5:

@@ -96,13 +96,21 @@ class ImageProcessor:
                 #print(f"returning color ({r}, {g}, {b}) with variance: {variance}")
                 #chosen_color= (int(r), int(g), int(b))
                 valid_colors[int(variance)]=(int(r), int(g), int(b))
-        chosen_color, chosen_color_variance=sorted(valid_colors.items())[-1][1], sorted(valid_colors.items())[-1][0]
+
+        try:
+            chosen_color, chosen_color_variance=sorted(valid_colors.items())[-1][1], sorted(valid_colors.items())[-1][0]
+        except IndexError:
+            print("List index error!")
+            print(f"valid_colors: {valid_colors}")
+            chosen_color=None
+            chosen_color_variance=None
+
         print(sorted(valid_colors.items()))
         if chosen_color:
             print(f"returning chosen color {chosen_color} with variance {chosen_color_variance}")
             return chosen_color
         else:
-            print(f"Could not determine dominant color defaulting to pinkish/red")
+            print(f"Could not determine dominant color defaulting to green")
             return (3,137,2)
     def is_blk_white(self, rgb):
         r, g, b = rgb

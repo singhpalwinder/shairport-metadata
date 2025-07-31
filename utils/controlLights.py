@@ -1,7 +1,6 @@
 import paho.mqtt.client as mqtt
 import threading, json, requests
 from time import sleep
-from .pironman5 import Pironman5
 from . import credentials
 
 class ControlLights:
@@ -9,7 +8,7 @@ class ControlLights:
         self.client = mqtt.Client(mqtt.CallbackAPIVersion.VERSION2)
         self.rgb = rgb
         self.enable_rgb = False
-        self.pi5=Pironman5(rgb=self.rgb)
+        #self.pi5=Pironman5(rgb=self.rgb)
         self.mqttConfig = {
             "mqttUsername": credentials.coordinatorUsername,
             "mqttPassword": credentials.coordinatorPassword,
@@ -73,16 +72,19 @@ class ControlLights:
 
         if curr_lux < 10:
             self.enable_rgb = True
-            print("Enabling RGB")
+            print(f"Curr lux value: {curr_lux} enabling RGB")
             self.publish_commands()
-            self.pi5.set_rgb_color()
+            #self.pi5.set_rgb_color()
         else:
             self.enable_rgb = False
             print("Disabling RGB")
             self.publish_commands()
-            self.pi5.disable_rgb()
+            #self.pi5.disable_rgb()
     def disable_lights(self):
         self.enable_rgb = False
         print("Disabling RGB")
         self.publish_commands()
-        self.pi5.disable_rgb()
+        #self.pi5.disable_rgb()
+
+
+

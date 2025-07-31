@@ -1,22 +1,26 @@
-import re, sys, requests, base64, json, cv2
-from sklearn.cluster import KMeans
+import re, sys, requests, base64, json, cv2, os, socket, hashlib
 from utils.imageProcessor import ImageProcessor
 from utils.controlLights import ControlLights
 import numpy as np
 
-DEBUG = False
+SSNC_PIPE_PATH="/tmp/shairport-sync-metadata"
+DEBUG = True
+LAST_SENT=""
 
+# regex to capture shairport-metadata output
+REGEX_LINE_ITEM = r"<item><type>(([A-Fa-f0-9]{2}){4})</type><code>(([A-Fa-f0-9]{2}){4})</code><length>(\d*)</length>"
 def debug(s):
     if DEBUG:
         print(s)
      
 def save_and_send_image(name):
-    url = "http://matrix.lan/icon.bmp"
+    print(f"processing and sending image: {name}")
+    HOST="matrix.lan"
+    PORT=9090
     color = None
     ip = ImageProcessor(name)
     primaryColor = ip.dominant_color()
 
-    #np_img = ordered_dither(np_img, bit_depth=8)  # or 4 if using 4-bit
     np_img = ip.enhance_image()
 
     # casting numpy array before shifting to prevent overflow errors
@@ -26,27 +30,37 @@ def save_and_send_image(name):
     rgb565 = (r << 8) | (g << 3) | b
 
     # Flatten to byte array: high byte first, low byte second
-    img_rgb565 = bytearray()
-    for val in rgb565.flatten():
-        img_rgb565.append((val >> 8) & 0xFF)  # high byte
-        img_rgb565.append(val & 0xFF)         # low byte
+    # img_rgb565 = bytearray()
+    # for val in rgb565.flatten():
+    #     img_rgb565.append((val >> 8) & 0xFF)  # high byte
+    #     img_rgb565.append(val & 0xFF)         # low byte
+
+    rgb565_be = rgb565.astype('>H') # >H means big-endian uint16
+
+    # get binary bytes
+    img_rgb565 = rgb565_be.flatten().tobytes()
 
     debug(f"Image size: {len(img_rgb565)} bytes")
-    response = requests.post(url, data=img_rgb565)
+
+    # send image over socket connection
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+        s.connect((HOST,PORT))
+        s.sendall(img_rgb565)
 
     zigbee = ControlLights(rgb=primaryColor)
     zigbee.set_lights()
 
-    print(f"Status: {response.status_code}")
-    debug(f"Response: {response.text}")
-def clear_artwork():
-    debug("Clearing artwork...")
-    res = requests.post("http://matrix.lan/reset")
-    debug(res.status_code)
-    debug(res.text)
+def clear_matrix_artwork():
+    try:
+        debug("Clearing artwork...")
+        res = requests.post("http://matrix.lan/reset")
+        debug(res.status_code)
+        debug(res.text)
+    except requests.exceptions.ConnectionError as e:
+        print(f"there was an error sending reset command to matrix: {e}")
+        return
 def start_item(line):
-    regex = r"<item><type>(([A-Fa-f0-9]{2}){4})</type><code>(([A-Fa-f0-9]{2}){4})</code><length>(\d*)</length>"
-    matches = re.findall(regex, line)
+    matches = re.findall(REGEX_LINE_ITEM, line)
     typ = bytes.fromhex(matches[0][0]).decode('utf-8', errors='ignore')
     code = bytes.fromhex(matches[0][2]).decode('utf-8', errors='ignore')
     length = int(matches[0][4])
@@ -77,103 +91,110 @@ def guessImageMime(magic):
         return 'image/png'
     else:
         return "image/jpg"
-
+def delete_artwork():
+    for file in os.listdir():
+        if file.endswith(".jpg") or file.endswith(".png"):
+            print(f"Deleting stale artwork {file}...")
+            os.remove(file)
 if __name__ == "__main__":
-    metadata = {}
-    fi = sys.stdin
-    while True:
-        line = sys.stdin.readline()
-        if not line:    #EOF
-            break
-        sys.stdout.flush()
-        if not line.startswith("<item>"):
-            continue
-        typ, code, length = start_item(line)
+    if not os.path.exists(SSNC_PIPE_PATH):
+        raise FileNotFoundError(f"{SSNC_PIPE_PATH} does not exist")
 
-        data = ""
-        if (length > 0):
-            r = start_data(sys.stdin.readline())
-            if (r == -1):
+    LAST_SENT = ""
+    track_state = {
+        "album": None,
+        "image_data": None,
+        "image_extension": None,
+        "image_hash": None,
+        "ready": False,
+        "sent": False
+    }
+
+    with open(SSNC_PIPE_PATH, 'r') as pipe:
+        while True:
+            line = pipe.readline()
+            if not line:
+                break
+            if not line.startswith("<item>"):
                 continue
-            data = read_data(sys.stdin.readline(), length)
 
-        # Everything read
-        if (typ == "core"):
-            # album name
-            if (code == "asal"): 
+            typ, code, length = start_item(line)
+            data = ""
+            if length > 0:
+                if start_data(pipe.readline()) == -1:
+                    continue
+                data = read_data(pipe.readline(), length)
+
+            # ========== METADATA ==========
+
+            if typ == "core" and code == "asal":
                 try:
-                    metadata['Album Name'] = data.decode()
+                    new_album = data.decode(errors="ignore")
+                    if new_album != track_state["album"]:
+                        track_state["album"] = new_album
+                        track_state["sent"] = False  # new album → allow resend
                 except:
-                    metadata["Album Name"] = "Unkown"
-            elif (code == "asar"):
-                metadata['Artist'] = data.decode()
-            #elif (code == "ascm"):
-            #    metadata['Comment'] = data
-            #elif (code == "asgn"):
-            #    metadata['Genre'] = data
-            elif (code == "minm"):
-                metadata['Title'] = data.decode()
-            #elif (code == "ascp"):
-            #    metadata['Composer'] = data
-            #elif (code == "asdt"):
-            #    metadata['File Kind'] = data
-            #elif (code == "assn"):
-            #    metadata['Sort as'] = data
-            #elif (code == "clip"):
-            #    metadata['IP'] = data
-        if (typ == "ssnc" and code == "snam"):
-            metadata['snam'] = data.decode()
-        if (typ == "ssnc" and code == "prgr"):
-            metadata['prgr'] = data.decode()
-            # play stream flush
-        if (typ == "ssnc" and code == "pfls"):
-            print("\t\tPlay stream flush")
-            metadata = {}
-            print(json.dumps({}))
-            sys.stdout.flush()
-            clear_artwork()
-        # play stream end
-        if (typ == "ssnc" and code == "pend"):
-            print("\t\tPlay stream end")
-            metadata = {}
-            print(json.dumps({}))
-            sys.stdout.flush()
-            clear_artwork()
-        # play stream resume
-        if (typ == "ssnc" and code == "prsm"):
-            metadata['pause'] = False
-        # play stream begin
-        if (typ == "ssnc" and code == "pbeg"):
-            metadata['pause'] = False
-        if (typ == "ssnc" and code == "PICT"):
-            if (len(data) == 0):
-                # clear_artwork()
-                # enable_rgb(False)
-                print(json.dumps({"image": ""}))
-                continue
-            else:
+                    track_state["album"] = None
+
+            elif typ == "ssnc" and code == "PICT":
+                if len(data) == 0:
+                    print(json.dumps({"image": ""}))
+                    sys.stdout.flush()
+                    continue
+
                 mime = guessImageMime(data)
-                extension = {
+                ext = {
                     'image/jpeg': '.jpg',
                     'image/png': '.png'
-                }.get(mime, '.jpg')  # Default to .jpg
-                
-                album_name = metadata.get("Album Name", None)
-                filename = ""
-                if album_name:
-                    filename = f"{album_name}{extension}"
-                else:
-                    filename = f"curr-song{extension}"
-                
-                with open(filename, "wb") as img_file:
-                        img_file.write(data)
-                save_and_send_image(filename)
-                # to print the base 64 code along with the image type print (json.dumps({"image": "data:" + mime + ";base64," + base64.b64encode(data).decode()}))
-                print (json.dumps({"image": "data:" + mime}))
-            sys.stdout.flush()
-        # track changed
-        if (typ == "ssnc" and code == "mden"):
-            print(json.dumps(metadata))
-            sys.stdout.flush()
-            metadata = {}
-            #clear_artwork()
+                }.get(mime, '.jpg')
+                img_hash = hashlib.md5(data).hexdigest()
+
+                if img_hash != track_state.get("image_hash"):
+                    track_state["image_data"] = data
+                    track_state["image_extension"] = ext
+                    track_state["image_hash"] = img_hash
+                    track_state["sent"] = False  # image changed → resend
+                    print(json.dumps({"image": f"data:{mime}"}))
+                    sys.stdout.flush()
+
+            # ====== Playback started/resumed/progressed ======
+            elif typ == "ssnc" and code in ["pbeg", "prsm", "prgr"]:
+                track_state["ready"] = True
+
+            # ====== Track ended/flushed/reset ======
+            elif typ == "ssnc" and code in ["pend", "pfls"]:
+                print(f"🧼 Stream reset: {code}")
+                track_state = {
+                    "album": None,
+                    "image_data": None,
+                    "image_extension": None,
+                    "image_hash": None,
+                    "ready": False,
+                    "sent": False
+                }
+                clear_matrix_artwork()
+                delete_artwork()
+                print(json.dumps({}))
+                sys.stdout.flush()
+
+            # ========== Ready to Send Image? ==========
+
+            if (
+                track_state["ready"]
+                and not track_state["sent"]
+                and track_state["album"]
+                and track_state["image_data"]
+            ):
+                file_name = f"{track_state['album'].lower().replace(' ', '_')}{track_state['image_extension']}"
+                delete_artwork()
+                print(f"Writing image {file_name} to disk...")
+                with open(file_name, "wb") as f:
+                    f.write(track_state["image_data"])
+                    f.flush()
+                os.sync()
+
+                print(f"📤 Sending {file_name}...")
+                save_and_send_image(file_name)
+
+                LAST_SENT = track_state["album"]
+                track_state["sent"] = True
