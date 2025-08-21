@@ -7,6 +7,10 @@ SSNC_PIPE_PATH="/tmp/shairport-sync-metadata"
 DEBUG = True
 LAST_SENT=""
 
+# --- lights controller  ---
+lights = ControlLights(rgb=(0, 0, 0))
+_have_snapshot = False
+
 # regex to capture shairport-metadata output
 REGEX_LINE_ITEM = r"<item><type>(([A-Fa-f0-9]{2}){4})</type><code>(([A-Fa-f0-9]{2}){4})</code><length>(\d*)</length>"
 def debug(s):
@@ -47,8 +51,10 @@ def save_and_send_image(name):
         s.connect((HOST,PORT))
         s.sendall(img_rgb565)
 
-    zigbee = ControlLights(rgb=primaryColor)
-    zigbee.set_lights()
+    # set lights for the track artwork color
+    lights.rgb = tuple(int(x) for x in primaryColor)
+    lights.enable_rgb = True
+    lights.publish_commands()
 
 def clear_matrix_artwork():
     try:
@@ -160,9 +166,18 @@ if __name__ == "__main__":
             # ====== Playback started/resumed/progressed ======
             elif typ == "ssnc" and code in ["pbeg", "prsm", "prgr"]:
                 track_state["ready"] = True
-
+                if not _have_snapshot:
+                    print("🎛️ Snapshotting light states...")
+                    lights.snapshot_states()   # grabs ON/OFF + brightness + color/ct per device
+                    _have_snapshot = True
             # ====== Track ended/flushed/reset ======
             elif typ == "ssnc" and code in ["pend", "pfls"]:
+
+                if _have_snapshot:
+                    print("↩️ Restoring light states...")
+                    lights.restore_states()
+                    _have_snapshot = False
+
                 print(f"🧼 Stream reset: {code}")
                 track_state = {
                     "album": None,
@@ -187,7 +202,7 @@ if __name__ == "__main__":
             ):
                 file_name = f"{track_state['album'].lower().replace(' ', '_')}{track_state['image_extension']}"
                 delete_artwork()
-                print(f"Writing image {file_name} to disk...")
+                print(f"📀 Writing image {file_name} to disk...")
                 with open(file_name, "wb") as f:
                     f.write(track_state["image_data"])
                     f.flush()
