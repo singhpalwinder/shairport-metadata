@@ -4,8 +4,7 @@ import json
 import threading
 import paho.mqtt.client as mqtt
 import requests
-from . import credentials
-
+import os
 class ControlLights:
     def __init__(self, rgb):
         self.client = mqtt.Client(mqtt.CallbackAPIVersion.VERSION2)
@@ -15,16 +14,18 @@ class ControlLights:
         self._snapshots = {}   # device -> snapshot to restore later
 
         self.mqttConfig = {
-            "mqttUsername": credentials.coordinatorUsername,
-            "mqttPassword": credentials.coordinatorPassword,
-            "mqttURL": credentials.coordinatorURL,
-            "mqttPort": credentials.coordinatorPort,
+            "mqttUsername": os.environ.get("coordinatorUsername"),
+            "mqttPassword": os.environ.get("coordinatorPassword"),
+            "mqttURL": os.environ.get("coordinatorURL"),
+            "mqttPort": os.environ.get("coordinatorPort"),
             "topics": [
                 "zigbee2mqtt/playbar1/set",
                 "zigbee2mqtt/playbar2/set",
                 "zigbee2mqtt/Desk/set",
                 "zigbee2mqtt/bedLeft/set",
-                "zigbee2mqtt/bedRight/set"
+                "zigbee2mqtt/bedRight/set",
+                "zigbee2mqtt/kitchenIsland1/set",
+                "zigbee2mqtt/kitchenIsland2/set"
             ]
         }
 
@@ -185,3 +186,6 @@ class ControlLights:
                 "brightness": brightness,
                 "color": {"r": 255, "g": 0, "b": 0}
             }
+
+
+
