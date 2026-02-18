@@ -1,0 +1,6 @@
+mqttTopics: 
+  - "zigbee2mqtt/playbar1/set"
+  - "zigbee2mqtt/playbar2/set"
+  - "zigbee2mqtt/Desk/set"
+  - "zigbee2mqtt/bedLeft/set"
+  - "zigbee2mqtt/bedRight/set"

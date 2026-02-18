@@ -81,12 +81,14 @@ def start_data(line):
     return 0
 
 def read_data(line, length):
-    b64size = 4*((length+2)//3);
+    b64size = 4*((length+2)//3)
     try:
-        data = base64.b64decode(line[:b64size].encode())
-    except TypeError:
+        b64_str = line[:b64size].encode()
+        b64_str += b'=' * (-len(b64_str) % 4)
+        data = base64.b64decode(b64_str)
+    except (TypeError, Exception):
         data = ""
-        pass
+    return data
     return data
 
 def guessImageMime(magic):
