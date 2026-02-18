@@ -14,10 +14,10 @@ class ControlLights:
         self._snapshots = {}   # device -> snapshot to restore later
 
         self.mqttConfig = {
-            "mqttUsername": os.environ.get("coordinatorUsername"),
-            "mqttPassword": os.environ.get("coordinatorPassword"),
-            "mqttURL": os.environ.get("coordinatorURL"),
-            "mqttPort": os.environ.get("coordinatorPort"),
+            "mqttUsername": os.environ["coordinatorUsername"],
+            "mqttPassword": os.environ["coordinatorPassword"],
+            "mqttURL": os.environ["coordinatorURL"],
+            "mqttPort": os.environ["coordinatorPort"],
             "topics": [
                 "zigbee2mqtt/playbar1/set",
                 "zigbee2mqtt/playbar2/set",
@@ -33,7 +33,11 @@ class ControlLights:
     def _new_client(self):
         c = mqtt.Client(mqtt.CallbackAPIVersion.VERSION2)
         c.username_pw_set(self.mqttConfig["mqttUsername"], self.mqttConfig["mqttPassword"])
-        c.connect(self.mqttConfig["mqttURL"], self.mqttConfig["mqttPort"], 60)
+        try:
+            c.connect(self.mqttConfig["mqttURL"], int(self.mqttConfig["mqttPort"]), 60)
+        except ValueError:
+            print(f"There was an error connecting to: {self.mqttConfig['mqttURL']}")
+            return
         return c
 
     def _device_name_from_topic(self, topic: str) -> str:
