@@ -1,4 +1,4 @@
-import re, sys, requests, base64, json, cv2, os, socket, hashlib
+import re, sys, requests, base64, json, cv2, os, socket, hashlib, plistlib
 from utils.imageProcessor import ImageProcessor
 from utils.controlLights import ControlLights
 import numpy as np
@@ -17,44 +17,46 @@ def debug(s):
     if DEBUG:
         print(s)
      
-def save_and_send_image(name):
-    print(f"processing and sending image: {name}")
+def process_and_send_image(art_bytes, label=""):
+    print(f"processing and sending image: {label or f'{len(art_bytes)} bytes'}")
     HOST="matrix.lan"
     PORT=9090
-    color = None
-    ip = ImageProcessor(name)
+
+    try:
+        ip = ImageProcessor(imgBytes=art_bytes)
+    except Exception as e:
+        print(f"Failed to decode artwork ({len(art_bytes)} bytes): {e}")
+        return
+
     primaryColor = ip.dominant_color()
 
-    np_img = ip.enhance_image()
+    # set lights first so they work even if matrix send fails
+    try:
+        lights.rgb = tuple(int(x) for x in primaryColor)
+        lights.enable_rgb = True
+        lights.publish_commands()
+    except Exception as e:
+        print(f"Failed to set lights: {e}")
 
-    # casting numpy array before shifting to prevent overflow errors
-    r = np_img[:, :, 0].astype(np.uint16) & 0xF8
-    g = np_img[:, :, 1].astype(np.uint16) & 0xFC
-    b = np_img[:, :, 2].astype(np.uint16) >> 3
-    rgb565 = (r << 8) | (g << 3) | b
+    try:
+        np_img = ip.enhance_image()
 
-    # Flatten to byte array: high byte first, low byte second
-    # img_rgb565 = bytearray()
-    # for val in rgb565.flatten():
-    #     img_rgb565.append((val >> 8) & 0xFF)  # high byte
-    #     img_rgb565.append(val & 0xFF)         # low byte
+        r = np_img[:, :, 0].astype(np.uint16) & 0xF8
+        g = np_img[:, :, 1].astype(np.uint16) & 0xFC
+        b = np_img[:, :, 2].astype(np.uint16) >> 3
+        rgb565 = (r << 8) | (g << 3) | b
 
-    rgb565_be = rgb565.astype('>H') # >H means big-endian uint16
+        rgb565_be = rgb565.astype('>H')
+        img_rgb565 = rgb565_be.flatten().tobytes()
 
-    # get binary bytes
-    img_rgb565 = rgb565_be.flatten().tobytes()
+        debug(f"Image size: {len(img_rgb565)} bytes")
 
-    debug(f"Image size: {len(img_rgb565)} bytes")
-
-    # send image over socket connection
-    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-        s.connect((HOST,PORT))
-        s.sendall(img_rgb565)
-
-    # set lights for the track artwork color
-    lights.rgb = tuple(int(x) for x in primaryColor)
-    lights.enable_rgb = True
-    lights.publish_commands()
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+            s.settimeout(5)
+            s.connect((HOST,PORT))
+            s.sendall(img_rgb565)
+    except Exception as e:
+        print(f"Failed to send image to matrix: {e}")
 
 def clear_matrix_artwork():
     try:
@@ -99,11 +101,6 @@ def guessImageMime(magic):
         return 'image/png'
     else:
         return "image/jpg"
-def delete_artwork():
-    for file in os.listdir():
-        if file.endswith(".jpg") or file.endswith(".png"):
-            print(f"Deleting stale artwork {file}...")
-            os.remove(file)
 if __name__ == "__main__":
     if not os.path.exists(SSNC_PIPE_PATH):
         raise FileNotFoundError(f"{SSNC_PIPE_PATH} does not exist")
@@ -144,6 +141,46 @@ if __name__ == "__main__":
                 except:
                     track_state["album"] = None
 
+            # AirPlay 2 now-playing: a binary plist (Apple MediaRemote) carrying
+            # album/title/artist AND embedded artwork in a single 'ssnc/copl' item.
+            # On AirPlay 2, shairport sends this INSTEAD of legacy 'core/asal' + 'ssnc/PICT'.
+            elif typ == "ssnc" and code == "copl":
+                try:
+                    pl = plistlib.loads(data if isinstance(data, (bytes, bytearray)) else bytes(data))
+                except Exception as e:
+                    debug(f"copl: could not parse plist: {e}")
+                    continue
+
+                info = {}
+                if isinstance(pl, dict):
+                    p = pl.get("params")
+                    if isinstance(p, dict) and isinstance(p.get("params"), dict):
+                        info = p["params"]
+                if not info:
+                    continue
+
+                new_album = info.get("kMRMediaRemoteNowPlayingInfoAlbum")
+                if new_album and new_album != track_state["album"]:
+                    track_state["album"] = new_album
+                    track_state["sent"] = False  # new album → allow resend
+
+                art = info.get("kMRMediaRemoteNowPlayingInfoArtworkData")
+                if art:
+                    art = bytes(art)
+                    img_hash = hashlib.md5(art).hexdigest()
+                    if img_hash != track_state.get("image_hash"):
+                        mime = guessImageMime(art)
+                        ext = {'image/jpeg': '.jpg', 'image/png': '.png'}.get(mime, '.jpg')
+                        track_state["image_data"] = art
+                        track_state["image_extension"] = ext
+                        track_state["image_hash"] = img_hash
+                        track_state["sent"] = False  # image changed → resend
+                        print(json.dumps({"image": f"data:{mime}"}))
+                        sys.stdout.flush()
+
+                # a now-playing update means audio is active
+                track_state["ready"] = True
+
             elif typ == "ssnc" and code == "PICT":
                 if len(data) == 0:
                     print(json.dumps({"image": ""}))
@@ -172,27 +209,30 @@ if __name__ == "__main__":
                     print("🎛️ Snapshotting light states...")
                     lights.snapshot_states()   # grabs ON/OFF + brightness + color/ct per device
                     _have_snapshot = True
-            # ====== Track ended/flushed/reset ======
-            elif typ == "ssnc" and code in ["pend", "pfls"]:
+            # ====== Track ended / flushed / session disconnected / went inactive ======
+            # pend/pfls = stream end/flush; disc = client disconnected; aend = playback
+            # went inactive. Any of them ends the session. Guarded so the multi-event
+            # teardown (e.g. pend -> disc -> aend) only runs the reset once.
+            elif typ == "ssnc" and code in ["pend", "pfls", "disc", "aend"]:
 
-                if _have_snapshot:
-                    print("↩️ Restoring light states...")
-                    lights.restore_states()
-                    _have_snapshot = False
+                if _have_snapshot or track_state["ready"] or track_state["album"] or track_state["image_data"]:
+                    if _have_snapshot:
+                        print("↩️ Restoring light states...")
+                        lights.restore_states()
+                        _have_snapshot = False
 
-                print(f"🧼 Stream reset: {code}")
-                track_state = {
-                    "album": None,
-                    "image_data": None,
-                    "image_extension": None,
-                    "image_hash": None,
-                    "ready": False,
-                    "sent": False
-                }
-                clear_matrix_artwork()
-                delete_artwork()
-                print(json.dumps({}))
-                sys.stdout.flush()
+                    print(f"🧼 Stream reset: {code}")
+                    track_state = {
+                        "album": None,
+                        "image_data": None,
+                        "image_extension": None,
+                        "image_hash": None,
+                        "ready": False,
+                        "sent": False
+                    }
+                    clear_matrix_artwork()
+                    print(json.dumps({}))
+                    sys.stdout.flush()
 
             # ========== Ready to Send Image? ==========
 
@@ -202,16 +242,10 @@ if __name__ == "__main__":
                 and track_state["album"]
                 and track_state["image_data"]
             ):
-                file_name = f"{track_state['album'].lower().replace(' ', '_')}{track_state['image_extension']}"
-                delete_artwork()
-                print(f"📀 Writing image {file_name} to disk...")
-                with open(file_name, "wb") as f:
-                    f.write(track_state["image_data"])
-                    f.flush()
-                os.sync()
-
-                print(f"📤 Sending {file_name}...")
-                save_and_send_image(file_name)
+                label = f"{track_state['album']}{track_state['image_extension']}"
+                print(f"📤 Processing artwork for {track_state['album']} "
+                      f"({len(track_state['image_data'])} bytes, in-memory)...")
+                process_and_send_image(track_state["image_data"], label=label)
 
                 LAST_SENT = track_state["album"]
                 track_state["sent"] = True
