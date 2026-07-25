@@ -1,17 +1,20 @@
-import cv2
+import cv2, io
 from sklearn.cluster import KMeans
 import numpy as np
 from PIL import Image, ImageEnhance
 
 class ImageProcessor:
-    def __init__(self, imgPath=None):
+    def __init__(self, imgPath=None, imgBytes=None):
         self.imgPath = imgPath
+        self.imgBytes = imgBytes
         self.img = None
         self.np_image = None
-        if imgPath:
+        if imgPath or imgBytes is not None:
             self.load_image()
     def load_image(self, width=32, height=32):
-        self.img = Image.open(self.imgPath).resize((width, height), Image.LANCZOS).convert('RGB')
+        # accept either a file path or raw image bytes (in-memory, no disk round-trip)
+        src = io.BytesIO(self.imgBytes) if self.imgBytes is not None else self.imgPath
+        self.img = Image.open(src).resize((width, height), Image.LANCZOS).convert('RGB')
         self.np_image = np.array(self.img)
 
     def enhance_image(self, increaseSaturation=True, reduceBrightness=True,increaseContrast=True):

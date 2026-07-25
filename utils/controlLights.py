@@ -5,6 +5,9 @@ import threading
 import paho.mqtt.client as mqtt
 import requests
 import os
+from dotenv import load_dotenv
+
+load_dotenv("/opt/shairport-metadata/.env")
 class ControlLights:
     def __init__(self, rgb):
         self.client = mqtt.Client(mqtt.CallbackAPIVersion.VERSION2)
