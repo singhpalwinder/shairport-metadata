@@ -1,4 +1,5 @@
 mod config;
+mod image_proc;
 mod metadata;
 
 use config::Config;
