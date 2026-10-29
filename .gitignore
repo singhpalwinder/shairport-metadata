@@ -8,3 +8,5 @@ credentials.py
 output
 .env
 .venv
+sun_times.json
+sun_times.json.tmp
