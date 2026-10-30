@@ -16,21 +16,7 @@ const LUMA: [f32; 3] = [0.299, 0.587, 0.114];
 /// Below this luma, chroma fades out so dark areas render neutral instead of
 /// as single-channel (usually red) LEDs.
 const CHROMA_FLOOR: f32 = 48.0;
-/// Defaults for the env-tunable look (MATRIX_GAMMA / MATRIX_SATURATION).
-/// LEDs are linear in light, artwork is gamma-encoded: without decoding,
-/// mid-tones come out too bright and colours look washed out.
-const DEFAULT_GAMMA: f32 = 1.8;
-const DEFAULT_SATURATION: f32 = 1.15;
-/// One 5-bit step in 0..255 output units. Output pixels within a few steps of
-/// black can't hold a hue (they'd round to a single-channel LED), so their
-/// chroma fades out from OUT_FLOOR_START steps over OUT_FLOOR_RAMP steps.
-const STEP5: f32 = 255.0 / 31.0;
-const OUT_FLOOR_START: f32 = 1.0;
-const OUT_FLOOR_RAMP: f32 = 3.0;
-
-fn env_f32(key: &str, default: f32) -> f32 {
-    std::env::var(key).ok().and_then(|v| v.trim().parse().ok()).unwrap_or(default)
-}
+const SATURATION: f32 = 1.15;
 /// Cap on the auto-levels stretch so flat/noisy covers aren't blown up.
 const MAX_LEVELS_GAIN: f32 = 4.0;
 
@@ -101,21 +87,15 @@ impl ImageProcessor {
 
     /// Big-endian RGB565 frame (row-major, 2048 bytes) for the matrix portal.
     pub fn matrix_frame(&self) -> Vec<u8> {
-        let gamma = env_f32("MATRIX_GAMMA", DEFAULT_GAMMA);
-        let saturation = env_f32("MATRIX_SATURATION", DEFAULT_SATURATION);
         let mut px = self.area.clone();
         auto_levels(&mut px);
         let mut out = Vec::with_capacity(px.len() * 2);
         for p in px.iter_mut() {
             let l = luma(*p);
-            let chroma = saturation * (l / CHROMA_FLOOR).clamp(0.0, 1.0);
+            let chroma = SATURATION * (l / CHROMA_FLOOR).clamp(0.0, 1.0);
             let mut c = p.map(|v| l + chroma * (v - l));
             clip_preserving_hue(&mut c, l);
-            let mut o = c.map(|v| 255.0 * (v / 255.0).powf(gamma) * MATRIX_GAIN);
-            let lo = luma(o);
-            let k = ((lo - OUT_FLOOR_START * STEP5) / (OUT_FLOOR_RAMP * STEP5)).clamp(0.0, 1.0);
-            o = o.map(|v| (lo + k * (v - lo)).max(0.0));
-            let [r, g, b] = o;
+            let [r, g, b] = c.map(|v| v * MATRIX_GAIN);
             out.extend_from_slice(&pack565(r, g, b).to_be_bytes());
         }
         out
@@ -186,13 +166,10 @@ fn clip_preserving_hue(c: &mut [f32; 3], l: f32) {
     }
 }
 
-/// Round (not truncate) to RGB565. Green is rounded to 5 bits too: the
-/// firmware runs Protomatter with 5 bit planes, which drops green's LSB, so a
-/// 6-bit green came out up to a step low and dim neutrals rendered magenta.
+/// Round (not truncate) to 5/6/5 bits.
 fn pack565(r: f32, g: f32, b: f32) -> u16 {
-    let q = |v: f32| (v * 31.0 / 255.0).round().clamp(0.0, 31.0) as u16;
-    let g5 = q(g);
-    (q(r) << 11) | (((g5 << 1) | (g5 >> 4)) << 5) | q(b)
+    let q = |v: f32, max: f32| (v * max / 255.0).round().clamp(0.0, max) as u16;
+    (q(r, 31.0) << 11) | (q(g, 63.0) << 5) | q(b, 31.0)
 }
 
 fn is_blk_white((r, g, b): (u8, u8, u8)) -> bool {
@@ -341,37 +318,6 @@ mod tests {
         let (r, g, b) = unpack(&frame, 0);
         // compare in 5-bit units (green is 6-bit)
         assert!(r.abs_diff(g / 2) <= 1 && r.abs_diff(b) <= 1, "got {r},{g},{b}");
-    }
-
-    #[test]
-    fn dark_brown_has_no_red_only_pixels() {
-        // dark warm vignette: the case that rendered as red blotches
-        let img = RgbImage::from_fn(64, 64, |x, y| {
-            let d = ((x as i32 - 32).pow(2) + (y as i32 - 32).pow(2)) as f32;
-            let v = (120.0 - d.sqrt() * 3.0).max(5.0);
-            image::Rgb([v as u8, (v * 0.8) as u8, (v * 0.65) as u8])
-        });
-        for gamma in ["1.0", "1.8", "2.2"] {
-            unsafe { std::env::set_var("MATRIX_GAMMA", gamma) };
-            let frame = ImageProcessor::from_rgb(img.clone()).matrix_frame();
-            let lone = (0..1024)
-                .map(|i| unpack(&frame, i))
-                .filter(|&(r, g, b)| r > 0 && g <= 1 && b == 0)
-                .count();
-            assert_eq!(lone, 0, "gamma {gamma}: {lone} red-only pixels");
-        }
-        unsafe { std::env::remove_var("MATRIX_GAMMA") };
-    }
-
-    #[test]
-    fn neutral_greys_stay_neutral_on_5bit_panel() {
-        // what Protomatter (5 bit planes) shows: green >> 1
-        for v in [10.0, 20.0, 30.0, 45.0, 128.0, 255.0] {
-            let p = pack565(v, v, v);
-            let (r, g6, b) = (p >> 11, (p >> 5) & 63, p & 31);
-            assert!(r == g6 >> 1 && r == b, "grey {v} -> {r},{},{b}", g6 >> 1);
-        }
-        assert_eq!(pack565(255.0, 255.0, 255.0), 0xFFFF);
     }
 
     #[test]
