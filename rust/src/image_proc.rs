@@ -186,10 +186,13 @@ fn clip_preserving_hue(c: &mut [f32; 3], l: f32) {
     }
 }
 
-/// Round (not truncate) to 5/6/5 bits.
+/// Round (not truncate) to RGB565. Green is rounded to 5 bits too: the
+/// firmware runs Protomatter with 5 bit planes, which drops green's LSB, so a
+/// 6-bit green came out up to a step low and dim neutrals rendered magenta.
 fn pack565(r: f32, g: f32, b: f32) -> u16 {
-    let q = |v: f32, max: f32| (v * max / 255.0).round().clamp(0.0, max) as u16;
-    (q(r, 31.0) << 11) | (q(g, 63.0) << 5) | q(b, 31.0)
+    let q = |v: f32| (v * 31.0 / 255.0).round().clamp(0.0, 31.0) as u16;
+    let g5 = q(g);
+    (q(r) << 11) | (((g5 << 1) | (g5 >> 4)) << 5) | q(b)
 }
 
 fn is_blk_white((r, g, b): (u8, u8, u8)) -> bool {
@@ -358,6 +361,17 @@ mod tests {
             assert_eq!(lone, 0, "gamma {gamma}: {lone} red-only pixels");
         }
         unsafe { std::env::remove_var("MATRIX_GAMMA") };
+    }
+
+    #[test]
+    fn neutral_greys_stay_neutral_on_5bit_panel() {
+        // what Protomatter (5 bit planes) shows: green >> 1
+        for v in [10.0, 20.0, 30.0, 45.0, 128.0, 255.0] {
+            let p = pack565(v, v, v);
+            let (r, g6, b) = (p >> 11, (p >> 5) & 63, p & 31);
+            assert!(r == g6 >> 1 && r == b, "grey {v} -> {r},{},{b}", g6 >> 1);
+        }
+        assert_eq!(pack565(255.0, 255.0, 255.0), 0xFFFF);
     }
 
     #[test]
