@@ -1,6 +1,7 @@
 import re, sys, requests, base64, json, cv2, os, socket, hashlib, plistlib
 from utils.imageProcessor import ImageProcessor
 from utils.controlLights import ControlLights
+from utils.sunSchedule import SunSchedule
 import numpy as np
 
 SSNC_PIPE_PATH="/tmp/shairport-sync-metadata"
@@ -10,6 +11,7 @@ LAST_SENT=""
 # --- lights controller  ---
 lights = ControlLights(rgb=(0, 0, 0))
 _have_snapshot = False
+sun = SunSchedule()
 
 # regex to capture shairport-metadata output
 REGEX_LINE_ITEM = r"<item><type>(([A-Fa-f0-9]{2}){4})</type><code>(([A-Fa-f0-9]{2}){4})</code><length>(\d*)</length>"
@@ -31,10 +33,14 @@ def process_and_send_image(art_bytes, label=""):
     primaryColor = ip.dominant_color()
 
     # set lights first so they work even if matrix send fails
+    # only between sunset and sunrise
     try:
-        lights.rgb = tuple(int(x) for x in primaryColor)
-        lights.enable_rgb = True
-        lights.publish_commands()
+        if not sun.is_dark():
+            debug("Sun is up; not changing lights")
+        else:
+            lights.rgb = tuple(int(x) for x in primaryColor)
+            lights.enable_rgb = True
+            lights.publish_commands()
     except Exception as e:
         print(f"Failed to set lights: {e}")
 
@@ -205,7 +211,7 @@ if __name__ == "__main__":
             # ====== Playback started/resumed/progressed ======
             elif typ == "ssnc" and code in ["pbeg", "prsm", "prgr"]:
                 track_state["ready"] = True
-                if not _have_snapshot:
+                if not _have_snapshot and sun.is_dark():
                     print("🎛️ Snapshotting light states...")
                     lights.snapshot_states()   # grabs ON/OFF + brightness + color/ct per device
                     _have_snapshot = True
