@@ -193,7 +193,7 @@ impl App {
             println!("Sun is up; not changing lights");
         }
 
-        let frame = image_proc::to_rgb565_be(&ip.enhance_image());
+        let frame = ip.matrix_frame();
         match matrix::send_frame(&self.matrix_host, &frame) {
             Ok(()) => println!("Sent {} byte frame to matrix in {:?}", frame.len(), start.elapsed()),
             Err(e) => eprintln!("Failed to send image to matrix: {e}"),

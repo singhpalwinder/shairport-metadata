@@ -1,5 +1,5 @@
-//! Port of utils/imageProcessor.py: 32x32 thumbnail, dominant colour for the
-//! lights, and an enhanced + dithered RGB565 frame for the matrix.
+//! 32x32 artwork processing: dominant colour for the lights (port of
+//! utils/imageProcessor.py) and a tone-mapped RGB565 frame for the matrix.
 
 use image::imageops::{self, FilterType};
 use image::{ImageReader, RgbImage};
@@ -7,8 +7,22 @@ use std::io::Cursor;
 
 pub const SIZE: u32 = 32;
 
+/// Overall matrix level, applied here (with rounding) instead of on the
+/// panel so no 565 levels are thrown away. ~70% keeps the PSU headroom the
+/// firmware's BRIGHTNESS=180 used to provide.
+pub const MATRIX_GAIN: f32 = 0.70;
+
+const LUMA: [f32; 3] = [0.299, 0.587, 0.114];
+/// Below this luma, chroma fades out so dark areas render neutral instead of
+/// as single-channel (usually red) LEDs.
+const CHROMA_FLOOR: f32 = 48.0;
+const SATURATION: f32 = 1.15;
+/// Cap on the auto-levels stretch so flat/noisy covers aren't blown up.
+const MAX_LEVELS_GAIN: f32 = 4.0;
+
 pub struct ImageProcessor {
-    img: RgbImage,
+    img: RgbImage,             // Lanczos thumbnail, used for the light colour
+    area: Vec<[f32; 3]>,       // box-filtered 32x32, used for the matrix
 }
 
 impl ImageProcessor {
@@ -17,14 +31,15 @@ impl ImageProcessor {
             .with_guessed_format()
             .map_err(|e| e.to_string())?
             .decode()
-            .map_err(|e| e.to_string())?;
-        let img = imageops::resize(&decoded.to_rgb8(), SIZE, SIZE, FilterType::Lanczos3);
-        Ok(Self { img })
+            .map_err(|e| e.to_string())?
+            .to_rgb8();
+        Ok(Self::from_rgb(decoded))
     }
 
-    #[cfg(test)]
-    pub fn from_rgb(img: RgbImage) -> Self {
-        Self { img }
+    pub fn from_rgb(src: RgbImage) -> Self {
+        let img = imageops::resize(&src, SIZE, SIZE, FilterType::Lanczos3);
+        let area = box_downscale(&src, SIZE as usize);
+        Self { img, area }
     }
 
     // ---------- lights ----------
@@ -70,99 +85,91 @@ impl ImageProcessor {
 
     // ---------- matrix ----------
 
-    /// Saturation x1.5, brightness x0.4, contrast x1.5 (PIL ImageEnhance
-    /// semantics), then Floyd-Steinberg down to 5 bits per channel.
-    pub fn enhance_image(&self) -> RgbImage {
-        let mut img = self.img.clone();
-
-        let grey: Vec<u8> = img.pixels().map(|p| luma(p.0)).collect();
-        for (p, &g) in img.pixels_mut().zip(&grey) {
-            for c in p.0.iter_mut() {
-                *c = blend(g, *c, 1.5);
-            }
+    /// Big-endian RGB565 frame (row-major, 2048 bytes) for the matrix portal.
+    pub fn matrix_frame(&self) -> Vec<u8> {
+        let mut px = self.area.clone();
+        auto_levels(&mut px);
+        let mut out = Vec::with_capacity(px.len() * 2);
+        for p in px.iter_mut() {
+            let l = luma(*p);
+            let chroma = SATURATION * (l / CHROMA_FLOOR).clamp(0.0, 1.0);
+            let mut c = p.map(|v| l + chroma * (v - l));
+            clip_preserving_hue(&mut c, l);
+            let [r, g, b] = c.map(|v| v * MATRIX_GAIN);
+            out.extend_from_slice(&pack565(r, g, b).to_be_bytes());
         }
-
-        for p in img.pixels_mut() {
-            for c in p.0.iter_mut() {
-                *c = blend(0, *c, 0.4);
-            }
-        }
-
-        let sum: u64 = img.pixels().map(|p| luma(p.0) as u64).sum();
-        let mean = (sum as f64 / (SIZE * SIZE) as f64 + 0.5) as u8;
-        for p in img.pixels_mut() {
-            for c in p.0.iter_mut() {
-                *c = blend(mean, *c, 1.5);
-            }
-        }
-
-        floyd_steinberg(&img, 5)
+        out
     }
 }
 
-/// PIL "L" conversion (ITU-R 601-2, fixed point).
-fn luma([r, g, b]: [u8; 3]) -> u8 {
-    ((r as u32 * 19595 + g as u32 * 38470 + b as u32 * 7471 + 0x8000) >> 16) as u8
+fn luma(p: [f32; 3]) -> f32 {
+    p[0] * LUMA[0] + p[1] * LUMA[1] + p[2] * LUMA[2]
 }
 
-/// PIL Image.blend(degenerate, image, alpha) for one channel.
-fn blend(degenerate: u8, v: u8, alpha: f32) -> u8 {
-    let t = degenerate as f32 + alpha * (v as f32 - degenerate as f32);
-    t.clamp(0.0, 255.0) as u8
-}
-
-fn floyd_steinberg(img: &RgbImage, bits: u32) -> RgbImage {
-    let (w, h) = (img.width() as usize, img.height() as usize);
-    let max = ((1u32 << bits) - 1) as f32;
-    let mut buf: Vec<[f32; 3]> = img
-        .pixels()
-        .map(|p| [p[0] as f32, p[1] as f32, p[2] as f32])
-        .collect();
-
-    let quantize = |v: f32| (v * max / 255.0).round_ties_even() * (255.0 / max);
-
-    for y in 0..h {
-        for x in 0..w {
-            let old = buf[y * w + x];
-            let new = old.map(quantize);
-            buf[y * w + x] = new;
-            let err = [old[0] - new[0], old[1] - new[1], old[2] - new[2]];
-
-            let mut spread = |xx: usize, yy: usize, f: f32| {
-                let p = &mut buf[yy * w + xx];
-                for c in 0..3 {
-                    p[c] += err[c] * f;
-                }
-            };
-            if x + 1 < w {
-                spread(x + 1, y, 7.0 / 16.0);
-            }
-            if y + 1 < h {
-                if x > 0 {
-                    spread(x - 1, y + 1, 3.0 / 16.0);
-                }
-                spread(x, y + 1, 5.0 / 16.0);
-                if x + 1 < w {
-                    spread(x + 1, y + 1, 1.0 / 16.0);
+/// Area average: every output pixel is the mean of the source pixels it
+/// covers, which is what one LED should show.
+fn box_downscale(src: &RgbImage, n: usize) -> Vec<[f32; 3]> {
+    let (w, h) = (src.width() as usize, src.height() as usize);
+    let mut out = vec![[0.0f32; 3]; n * n];
+    for oy in 0..n {
+        let (y0, y1) = (oy * h / n, ((oy + 1) * h / n).max(oy * h / n + 1).min(h));
+        for ox in 0..n {
+            let (x0, x1) = (ox * w / n, ((ox + 1) * w / n).max(ox * w / n + 1).min(w));
+            let mut acc = [0.0f64; 3];
+            for y in y0..y1 {
+                for x in x0..x1 {
+                    let p = src.get_pixel(x as u32, y as u32);
+                    for c in 0..3 {
+                        acc[c] += p[c] as f64;
+                    }
                 }
             }
+            let cnt = ((y1 - y0) * (x1 - x0)) as f64;
+            out[oy * n + ox] = acc.map(|a| (a / cnt) as f32);
         }
-    }
-
-    RgbImage::from_fn(w as u32, h as u32, |x, y| {
-        let p = buf[y as usize * w + x as usize];
-        image::Rgb(p.map(|v| v.clamp(0.0, 255.0) as u8))
-    })
-}
-
-/// Big-endian RGB565, row-major — what the matrix portal expects.
-pub fn to_rgb565_be(img: &RgbImage) -> Vec<u8> {
-    let mut out = Vec::with_capacity((img.width() * img.height() * 2) as usize);
-    for p in img.pixels() {
-        let v = ((p[0] as u16 & 0xF8) << 8) | ((p[1] as u16 & 0xFC) << 3) | (p[2] as u16 >> 3);
-        out.extend_from_slice(&v.to_be_bytes());
     }
     out
+}
+
+fn percentile(sorted: &[f32], q: f32) -> f32 {
+    let i = (q * (sorted.len() - 1) as f32).round() as usize;
+    sorted[i.min(sorted.len() - 1)]
+}
+
+/// Stretch luma so the 1st..99.5th percentile spans the full range, with the
+/// same offset/gain on every channel so hues are kept.
+fn auto_levels(px: &mut [[f32; 3]]) {
+    let mut l: Vec<f32> = px.iter().map(|p| luma(*p)).collect();
+    l.sort_by(f32::total_cmp);
+    let lo = percentile(&l, 0.01);
+    let hi = percentile(&l, 0.995);
+    let gain = (255.0 / (hi - lo).max(1.0)).min(MAX_LEVELS_GAIN);
+    for p in px.iter_mut() {
+        *p = p.map(|v| (v - lo) * gain);
+    }
+}
+
+/// Bring out-of-range pixels back by scaling chroma toward luma rather than
+/// clamping each channel, so highlights keep their hue.
+fn clip_preserving_hue(c: &mut [f32; 3], l: f32) {
+    let l = l.clamp(0.0, 255.0);
+    let mut t: f32 = 1.0;
+    for &v in c.iter() {
+        if v > 255.0 {
+            t = t.min((255.0 - l) / (v - l));
+        } else if v < 0.0 {
+            t = t.min(l / (l - v));
+        }
+    }
+    for v in c.iter_mut() {
+        *v = (l + t * (*v - l)).clamp(0.0, 255.0);
+    }
+}
+
+/// Round (not truncate) to 5/6/5 bits.
+fn pack565(r: f32, g: f32, b: f32) -> u16 {
+    let q = |v: f32, max: f32| (v * max / 255.0).round().clamp(0.0, max) as u16;
+    (q(r, 31.0) << 11) | (q(g, 63.0) << 5) | q(b, 31.0)
 }
 
 fn is_blk_white((r, g, b): (u8, u8, u8)) -> bool {
@@ -262,6 +269,11 @@ mod tests {
         RgbImage::from_fn(SIZE, SIZE, |x, _| image::Rgb(if x < 24 { a } else { b }))
     }
 
+    fn unpack(frame: &[u8], i: usize) -> (u16, u16, u16) {
+        let v = u16::from_be_bytes([frame[i * 2], frame[i * 2 + 1]]);
+        (v >> 11, (v >> 5) & 63, v & 31)
+    }
+
     #[test]
     fn picks_colourful_over_black() {
         let ip = ImageProcessor::from_rgb(halves([5, 5, 5], [200, 30, 40]));
@@ -278,13 +290,42 @@ mod tests {
     #[test]
     fn matrix_frame_is_2048_bytes() {
         let ip = ImageProcessor::from_rgb(halves([10, 200, 90], [240, 20, 20]));
-        assert_eq!(to_rgb565_be(&ip.enhance_image()).len(), 2048);
+        assert_eq!(ip.matrix_frame().len(), 2048);
     }
 
     #[test]
-    fn rgb565_packing() {
-        let img = RgbImage::from_pixel(1, 1, image::Rgb([255, 0, 0]));
-        assert_eq!(to_rgb565_be(&img), vec![0xF8, 0x00]);
+    fn rgb565_rounds() {
+        assert_eq!(pack565(255.0, 0.0, 0.0), 0xF800);
+        assert_eq!(pack565(4.2, 0.0, 0.0), 1 << 11); // truncation would give 0
+    }
+
+    #[test]
+    fn dark_cover_is_stretched() {
+        // dim warm gradient, like a dark album cover
+        let img = RgbImage::from_fn(64, 64, |x, _| {
+            let v = (x * 85 / 63) as u8;
+            image::Rgb([v + 6, v + 3, v])
+        });
+        let frame = ImageProcessor::from_rgb(img).matrix_frame();
+        let max_r = (0..1024).map(|i| unpack(&frame, i).0).max().unwrap();
+        assert!(max_r >= 20, "brightest red level only {max_r}/31");
+    }
+
+    #[test]
+    fn near_black_is_neutral() {
+        // very dark brown next to white so levels don't lift it
+        let frame = ImageProcessor::from_rgb(halves([22, 12, 8], [255, 255, 255])).matrix_frame();
+        let (r, g, b) = unpack(&frame, 0);
+        // compare in 5-bit units (green is 6-bit)
+        assert!(r.abs_diff(g / 2) <= 1 && r.abs_diff(b) <= 1, "got {r},{g},{b}");
+    }
+
+    #[test]
+    fn highlights_keep_hue() {
+        let mut c = [300.0, 200.0, 100.0];
+        let l = luma(c);
+        clip_preserving_hue(&mut c, l);
+        assert!(c[0] <= 255.0 && c[0] > c[1] && c[1] > c[2]);
     }
 
     #[test]
