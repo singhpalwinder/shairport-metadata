@@ -1,0 +1,17 @@
+[Unit]
+Description=Shairport Metadata Listener (Rust)
+After=network.target sound.target
+Conflicts=shairport-metadata.service
+
+[Service]
+EnvironmentFile=/etc/shairport-metadata.env
+ExecStart=/opt/shairport-metadata/rust/target/release/shairport-metadata
+Restart=always
+RestartSec=1
+User=psingh
+WorkingDirectory=/opt/shairport-metadata/
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

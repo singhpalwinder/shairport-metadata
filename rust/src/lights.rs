@@ -24,6 +24,7 @@ pub struct Lights {
     client: Client,
     shared: Arc<(Mutex<State>, Condvar)>,
     snapshots: HashMap<String, Map<String, Value>>,
+    have_snapshot: bool, // set even if no device reported, so we don't retry every event
 }
 
 fn device(topic: &str) -> &str {
@@ -89,7 +90,7 @@ impl Lights {
             })
             .expect("spawn mqtt thread");
 
-        Self { client, shared, snapshots: HashMap::new() }
+        Self { client, shared, snapshots: HashMap::new(), have_snapshot: false }
     }
 
     fn publish(&self, topic: &str, payload: &Value) {
@@ -99,7 +100,7 @@ impl Lights {
     }
 
     pub fn has_snapshot(&self) -> bool {
-        !self.snapshots.is_empty()
+        self.have_snapshot
     }
 
     /// Remember the current state of every light for restore_states().
@@ -119,6 +120,7 @@ impl Lights {
             s = cv.wait_timeout(s, until - now).unwrap().0;
         }
 
+        self.have_snapshot = true;
         self.snapshots.clear();
         for dev in devices() {
             let Some(p) = s.curr.get(dev) else { continue };
@@ -143,6 +145,7 @@ impl Lights {
 
     /// Push the saved snapshot back; OFF devices only get turned off.
     pub fn restore_states(&mut self) {
+        self.have_snapshot = false;
         if self.snapshots.is_empty() {
             println!("No snapshots to restore.");
             return;

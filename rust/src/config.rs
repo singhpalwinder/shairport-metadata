@@ -4,10 +4,7 @@ use std::env;
 /// (e.g. from systemd's EnvironmentFile) win.
 pub const DOTENV_PATH: &str = "/opt/shairport-metadata/.env";
 
-pub const SSNC_PIPE_PATH: &str = "/tmp/shairport-sync-metadata";
-pub const MATRIX_HOST: &str = "matrix.lan";
 pub const MATRIX_PORT: u16 = 9090;
-pub const MATRIX_RESET_URL: &str = "http://matrix.lan/reset";
 pub const SUN_CACHE_PATH: &str = "/opt/shairport-metadata/sun_times.json";
 
 pub const LIGHT_TOPICS: &[&str] = &[
@@ -28,6 +25,8 @@ pub struct Config {
     pub mqtt_port: u16,
     pub ha_url: String,
     pub ha_token: Option<String>,
+    pub pipe_path: String,
+    pub matrix_host: String,
 }
 
 impl Config {
@@ -47,6 +46,8 @@ impl Config {
                 .map_err(|_| format!("bad coordinatorPort {port:?}"))?,
             ha_url: env::var("HA_URL").unwrap_or_else(|_| "http://homeassistant.lan:8123".into()),
             ha_token: env::var("HA_TOKEN").ok().filter(|t| !t.is_empty()),
+            pipe_path: env::var("SSNC_PIPE_PATH").unwrap_or_else(|_| "/tmp/shairport-sync-metadata".into()),
+            matrix_host: env::var("MATRIX_HOST").unwrap_or_else(|_| "matrix.lan".into()),
         })
     }
 }
