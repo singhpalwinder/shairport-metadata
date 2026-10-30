@@ -51,8 +51,13 @@ fn hash(data: &[u8]) -> u64 {
 }
 
 /// AirPlay 2 now-playing info: binary plist with params.params.{Album, ArtworkData}.
-fn parse_copl(data: &[u8]) -> Option<(Option<String>, Option<Vec<u8>>)> {
-    let pl = Value::from_reader(std::io::Cursor::new(data)).ok()?;
+/// Ok(None) for updates that carry no now-playing info (e.g. play state only).
+fn parse_copl(data: &[u8]) -> Result<Option<(Option<String>, Option<Vec<u8>>)>, plist::Error> {
+    let pl = Value::from_reader(std::io::Cursor::new(data))?;
+    Ok(now_playing(&pl))
+}
+
+fn now_playing(pl: &Value) -> Option<(Option<String>, Option<Vec<u8>>)> {
     let info = pl
         .as_dictionary()?
         .get("params")?
@@ -97,9 +102,13 @@ impl App {
 
             // On AirPlay 2 shairport sends this instead of core/asal + ssnc/PICT
             ("ssnc", "copl") => {
-                let Some((album, art)) = parse_copl(&item.data) else {
-                    println!("copl: could not parse plist");
-                    return;
+                let (album, art) = match parse_copl(&item.data) {
+                    Ok(Some(v)) => v,
+                    Ok(None) => return,
+                    Err(e) => {
+                        println!("copl: could not parse plist: {e}");
+                        return;
+                    }
                 };
                 if let Some(a) = album.filter(|a| !a.is_empty()) {
                     self.set_album(a);
@@ -237,7 +246,7 @@ mod tests {
 
         let mut buf = Vec::new();
         Value::Dictionary(root).to_writer_binary(&mut buf).unwrap();
-        let (album, art) = parse_copl(&buf).unwrap();
+        let (album, art) = parse_copl(&buf).unwrap().unwrap();
         assert_eq!(album.as_deref(), Some("Rodeo"));
         assert_eq!(art, Some(vec![0xff, 0xd8, 1]));
     }
