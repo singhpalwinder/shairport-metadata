@@ -23,7 +23,11 @@ struct TrackState {
     image: Option<Vec<u8>>,
     image_hash: Option<u64>,
     ready: bool,
-    sent: bool,
+    /// Hash of the artwork last sent to the matrix. Sending is keyed on the
+    /// image changing, not the album: on a track change AirPlay 2 delivers the
+    /// new album name with the *previous* artwork first, which used to flash
+    /// the old cover (and re-set the lights) before the real one arrived.
+    sent_hash: Option<u64>,
 }
 
 struct App {
@@ -82,7 +86,6 @@ impl App {
     fn set_album(&mut self, album: String) {
         if self.track.album.as_deref() != Some(&album) {
             self.track.album = Some(album);
-            self.track.sent = false; // new album → allow resend
         }
     }
 
@@ -92,7 +95,6 @@ impl App {
             println!("{{\"image\": \"data:{}\"}}", image_mime(&art));
             self.track.image = Some(art);
             self.track.image_hash = Some(h);
-            self.track.sent = false; // image changed → resend
         }
     }
 
@@ -141,7 +143,11 @@ impl App {
             _ => {}
         }
 
-        if self.track.ready && !self.track.sent && self.track.album.is_some() {
+        if self.track.ready
+            && self.track.album.is_some()
+            && self.track.image_hash.is_some()
+            && self.track.image_hash != self.track.sent_hash
+        {
             if let Some(art) = self.track.image.take() {
                 println!(
                     "📤 Processing artwork for {} ({} bytes, in-memory)...",
@@ -150,7 +156,7 @@ impl App {
                 );
                 self.process_and_send(&art);
                 self.track.image = Some(art);
-                self.track.sent = true;
+                self.track.sent_hash = self.track.image_hash;
             }
         }
     }
