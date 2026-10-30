@@ -1,11 +1,12 @@
 //! Port of utils/controlLights.py over a single persistent MQTT connection.
-//! Device state topics (zigbee2mqtt/<dev>) stay subscribed, so the latest
-//! state of every light is always cached.
+//! Device state topics (zigbee2mqtt/<dev>) stay subscribed and every device
+//! is asked for its state on (re)connect, so the latest state of each light is
+//! always cached and a snapshot is just a copy of that cache.
 
 use crate::config::{Config, LIGHT_TOPICS};
 use rumqttc::{Client, Event, MqttOptions, Packet, QoS, SubscribeFilter};
 use serde_json::{Map, Value, json};
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::sync::{Arc, Condvar, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
@@ -13,9 +14,11 @@ use std::time::{Duration, Instant};
 #[derive(Default)]
 struct State {
     curr: HashMap<String, Value>, // device -> last payload from zigbee2mqtt/<device>
-    fresh: HashSet<String>,       // devices that reported since the last snapshot request
-    subscribed: bool,             // state topics subscribed on the current connection
+    subscribed_at: Option<Instant>, // when state topics were subscribed on this connection
 }
+
+/// How long after subscribing to give devices to answer the initial /get.
+const PRIME_WAIT: Duration = Duration::from_secs(1);
 
 pub struct Lights {
     client: Client,
@@ -52,24 +55,29 @@ impl Lights {
                     match ev {
                         Ok(Event::Incoming(Packet::ConnAck(_))) => {
                             println!("MQTT connected");
-                            st.0.lock().unwrap().subscribed = false;
+                            st.0.lock().unwrap().subscribed_at = None;
                             let filters = devices()
                                 .map(|d| SubscribeFilter::new(format!("zigbee2mqtt/{d}"), QoS::AtMostOnce));
                             let _ = sub_client.try_subscribe_many(filters);
                         }
                         Ok(Event::Incoming(Packet::SubAck(_))) => {
+                            let get = json!({"state": "", "brightness": "", "color": "", "color_temp": ""});
+                            for dev in devices() {
+                                let _ = sub_client.try_publish(
+                                    format!("zigbee2mqtt/{dev}/get"),
+                                    QoS::AtMostOnce,
+                                    false,
+                                    get.to_string(),
+                                );
+                            }
                             let (lock, cv) = &*st;
-                            lock.lock().unwrap().subscribed = true;
+                            lock.lock().unwrap().subscribed_at = Some(Instant::now());
                             cv.notify_all();
                         }
                         Ok(Event::Incoming(Packet::Publish(p))) => {
                             let Ok(payload) = serde_json::from_slice::<Value>(&p.payload) else { continue };
                             let dev = device(&p.topic).to_string();
-                            let (lock, cv) = &*st;
-                            let mut s = lock.lock().unwrap();
-                            s.fresh.insert(dev.clone());
-                            s.curr.insert(dev, payload);
-                            cv.notify_all();
+                            st.0.lock().unwrap().curr.insert(dev, payload);
                         }
                         Ok(_) => {}
                         Err(e) => {
@@ -94,31 +102,21 @@ impl Lights {
         !self.snapshots.is_empty()
     }
 
-    /// Ask every device for a fresh state report and remember it for restore.
+    /// Remember the current state of every light for restore_states().
+    /// Only waits (up to `timeout`) right after startup/reconnect, while the
+    /// initial state reports are still coming in.
     pub fn snapshot_states(&mut self, timeout: Duration) {
         let (lock, cv) = &*self.shared;
         let deadline = Instant::now() + timeout;
-
-        // replies sent before the subscription lands would be missed
         let mut s = lock.lock().unwrap();
-        while !s.subscribed && Instant::now() < deadline {
-            s = cv.wait_timeout(s, deadline - Instant::now()).unwrap().0;
-        }
-        s.fresh.clear();
-        drop(s);
-
-        let get = json!({"state": "", "brightness": "", "color": "", "color_temp": ""});
-        for dev in devices() {
-            self.publish(&format!("zigbee2mqtt/{dev}/get"), &get);
-        }
-
-        let mut s = lock.lock().unwrap();
-        while !devices().all(|d| s.fresh.contains(d)) {
+        loop {
+            let ready_at = s.subscribed_at.map(|t| t + PRIME_WAIT);
             let now = Instant::now();
-            if now >= deadline {
+            if ready_at.is_some_and(|r| now >= r) || now >= deadline {
                 break;
             }
-            s = cv.wait_timeout(s, deadline - now).unwrap().0;
+            let until = ready_at.map_or(deadline, |r| r.min(deadline));
+            s = cv.wait_timeout(s, until - now).unwrap().0;
         }
 
         self.snapshots.clear();
