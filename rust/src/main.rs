@@ -179,6 +179,12 @@ impl App {
 
         // lights first so they work even if the matrix send fails; only after dark
         if self.sun.is_dark() {
+            // AirPlay 2 can deliver artwork before pbeg/prgr; snapshot before
+            // the first colour change so restore gets the pre-session state
+            if !self.lights.has_snapshot() {
+                println!("🎛️ Snapshotting light states...");
+                self.lights.snapshot_states(SNAPSHOT_TIMEOUT);
+            }
             self.lights.set_color(ip.dominant_color(4));
         } else {
             println!("Sun is up; not changing lights");
