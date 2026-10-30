@@ -19,8 +19,14 @@ const CHROMA_FLOOR: f32 = 48.0;
 /// Defaults for the env-tunable look (MATRIX_GAMMA / MATRIX_SATURATION).
 /// LEDs are linear in light, artwork is gamma-encoded: without decoding,
 /// mid-tones come out too bright and colours look washed out.
-const DEFAULT_GAMMA: f32 = 2.0;
-const DEFAULT_SATURATION: f32 = 1.35;
+const DEFAULT_GAMMA: f32 = 1.8;
+const DEFAULT_SATURATION: f32 = 1.15;
+/// One 5-bit step in 0..255 output units. Output pixels within a few steps of
+/// black can't hold a hue (they'd round to a single-channel LED), so their
+/// chroma fades out from OUT_FLOOR_START steps over OUT_FLOOR_RAMP steps.
+const STEP5: f32 = 255.0 / 31.0;
+const OUT_FLOOR_START: f32 = 1.0;
+const OUT_FLOOR_RAMP: f32 = 3.0;
 
 fn env_f32(key: &str, default: f32) -> f32 {
     std::env::var(key).ok().and_then(|v| v.trim().parse().ok()).unwrap_or(default)
@@ -105,7 +111,11 @@ impl ImageProcessor {
             let chroma = saturation * (l / CHROMA_FLOOR).clamp(0.0, 1.0);
             let mut c = p.map(|v| l + chroma * (v - l));
             clip_preserving_hue(&mut c, l);
-            let [r, g, b] = c.map(|v| 255.0 * (v / 255.0).powf(gamma) * MATRIX_GAIN);
+            let mut o = c.map(|v| 255.0 * (v / 255.0).powf(gamma) * MATRIX_GAIN);
+            let lo = luma(o);
+            let k = ((lo - OUT_FLOOR_START * STEP5) / (OUT_FLOOR_RAMP * STEP5)).clamp(0.0, 1.0);
+            o = o.map(|v| (lo + k * (v - lo)).max(0.0));
+            let [r, g, b] = o;
             out.extend_from_slice(&pack565(r, g, b).to_be_bytes());
         }
         out
@@ -328,6 +338,26 @@ mod tests {
         let (r, g, b) = unpack(&frame, 0);
         // compare in 5-bit units (green is 6-bit)
         assert!(r.abs_diff(g / 2) <= 1 && r.abs_diff(b) <= 1, "got {r},{g},{b}");
+    }
+
+    #[test]
+    fn dark_brown_has_no_red_only_pixels() {
+        // dark warm vignette: the case that rendered as red blotches
+        let img = RgbImage::from_fn(64, 64, |x, y| {
+            let d = ((x as i32 - 32).pow(2) + (y as i32 - 32).pow(2)) as f32;
+            let v = (120.0 - d.sqrt() * 3.0).max(5.0);
+            image::Rgb([v as u8, (v * 0.8) as u8, (v * 0.65) as u8])
+        });
+        for gamma in ["1.0", "1.8", "2.2"] {
+            unsafe { std::env::set_var("MATRIX_GAMMA", gamma) };
+            let frame = ImageProcessor::from_rgb(img.clone()).matrix_frame();
+            let lone = (0..1024)
+                .map(|i| unpack(&frame, i))
+                .filter(|&(r, g, b)| r > 0 && g <= 1 && b == 0)
+                .count();
+            assert_eq!(lone, 0, "gamma {gamma}: {lone} red-only pixels");
+        }
+        unsafe { std::env::remove_var("MATRIX_GAMMA") };
     }
 
     #[test]
