@@ -2,6 +2,7 @@ mod config;
 mod image_proc;
 mod lights;
 mod metadata;
+mod sun;
 
 use config::Config;
 use metadata::MetadataReader;
