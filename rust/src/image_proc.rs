@@ -16,7 +16,15 @@ const LUMA: [f32; 3] = [0.299, 0.587, 0.114];
 /// Below this luma, chroma fades out so dark areas render neutral instead of
 /// as single-channel (usually red) LEDs.
 const CHROMA_FLOOR: f32 = 48.0;
-const SATURATION: f32 = 1.15;
+/// Defaults for the env-tunable look (MATRIX_GAMMA / MATRIX_SATURATION).
+/// LEDs are linear in light, artwork is gamma-encoded: without decoding,
+/// mid-tones come out too bright and colours look washed out.
+const DEFAULT_GAMMA: f32 = 2.0;
+const DEFAULT_SATURATION: f32 = 1.35;
+
+fn env_f32(key: &str, default: f32) -> f32 {
+    std::env::var(key).ok().and_then(|v| v.trim().parse().ok()).unwrap_or(default)
+}
 /// Cap on the auto-levels stretch so flat/noisy covers aren't blown up.
 const MAX_LEVELS_GAIN: f32 = 4.0;
 
@@ -87,15 +95,17 @@ impl ImageProcessor {
 
     /// Big-endian RGB565 frame (row-major, 2048 bytes) for the matrix portal.
     pub fn matrix_frame(&self) -> Vec<u8> {
+        let gamma = env_f32("MATRIX_GAMMA", DEFAULT_GAMMA);
+        let saturation = env_f32("MATRIX_SATURATION", DEFAULT_SATURATION);
         let mut px = self.area.clone();
         auto_levels(&mut px);
         let mut out = Vec::with_capacity(px.len() * 2);
         for p in px.iter_mut() {
             let l = luma(*p);
-            let chroma = SATURATION * (l / CHROMA_FLOOR).clamp(0.0, 1.0);
+            let chroma = saturation * (l / CHROMA_FLOOR).clamp(0.0, 1.0);
             let mut c = p.map(|v| l + chroma * (v - l));
             clip_preserving_hue(&mut c, l);
-            let [r, g, b] = c.map(|v| v * MATRIX_GAIN);
+            let [r, g, b] = c.map(|v| 255.0 * (v / 255.0).powf(gamma) * MATRIX_GAIN);
             out.extend_from_slice(&pack565(r, g, b).to_be_bytes());
         }
         out

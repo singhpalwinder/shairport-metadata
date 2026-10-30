@@ -201,7 +201,36 @@ impl App {
     }
 }
 
+/// `shairport-metadata send <image>`: push one cover to the matrix with the
+/// current MATRIX_GAMMA / MATRIX_SATURATION, for tuning the look.
+fn send_one(path: &str, matrix_host: &str) -> ! {
+    let result = std::fs::read(path)
+        .map_err(|e| e.to_string())
+        .and_then(|b| ImageProcessor::from_bytes(&b))
+        .and_then(|ip| matrix::send_frame(matrix_host, &ip.matrix_frame()).map_err(|e| e.to_string()));
+    match result {
+        Ok(()) => {
+            println!("sent {path} to {matrix_host}");
+            std::process::exit(0)
+        }
+        Err(e) => {
+            eprintln!("send failed: {e}");
+            std::process::exit(1)
+        }
+    }
+}
+
 fn main() {
+    let args: Vec<String> = std::env::args().collect();
+    if args.get(1).map(String::as_str) == Some("send") {
+        let Some(path) = args.get(2) else {
+            eprintln!("usage: shairport-metadata send <image>");
+            std::process::exit(2);
+        };
+        let host = std::env::var("MATRIX_HOST").unwrap_or_else(|_| "matrix.lan".into());
+        send_one(path, &host);
+    }
+
     let cfg = Config::load().unwrap_or_else(|e| {
         eprintln!("config error: {e}");
         std::process::exit(1);
