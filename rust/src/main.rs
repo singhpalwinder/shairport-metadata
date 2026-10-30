@@ -1,5 +1,6 @@
 mod config;
 mod image_proc;
+mod lights;
 mod metadata;
 
 use config::Config;
