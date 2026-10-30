@@ -6,6 +6,8 @@ pub const DOTENV_PATH: &str = "/opt/shairport-metadata/.env";
 
 pub const MATRIX_PORT: u16 = 9090;
 pub const SUN_CACHE_PATH: &str = "/opt/shairport-metadata/sun_times.json";
+/// Pre-session light states, kept on disk so a restart mid-session still restores them.
+pub const SNAPSHOT_PATH: &str = "/opt/shairport-metadata/light_snapshot.json";
 
 pub const LIGHT_TOPICS: &[&str] = &[
     "zigbee2mqtt/playbar1/set",

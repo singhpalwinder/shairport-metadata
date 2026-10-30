@@ -1,13 +1,15 @@
 //! Port of utils/controlLights.py over a single persistent MQTT connection.
 //! Device state topics (zigbee2mqtt/<dev>) stay subscribed and every device
 //! is asked for its state on (re)connect, so the latest state of each light is
-//! always cached and a snapshot is just a copy of that cache.
+//! always cached and a snapshot is just a copy of that cache. The snapshot is
+//! mirrored to SNAPSHOT_PATH so it survives a restart mid-session.
 
-use crate::config::{Config, LIGHT_TOPICS};
-use rumqttc::{Client, Event, MqttOptions, Packet, QoS, SubscribeFilter};
+use crate::config::{Config, LIGHT_TOPICS, SNAPSHOT_PATH};
+use rumqttc::{Client, Event, MqttOptions, Outgoing, Packet, QoS, SubscribeFilter};
 use serde_json::{Map, Value, json};
 use std::collections::HashMap;
-use std::sync::{Arc, Condvar, Mutex};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Condvar, Mutex, mpsc};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -25,6 +27,15 @@ pub struct Lights {
     shared: Arc<(Mutex<State>, Condvar)>,
     snapshots: HashMap<String, Map<String, Value>>,
     have_snapshot: bool, // set even if no device reported, so we don't retry every event
+    stopping: Arc<AtomicBool>,
+    done: mpsc::Receiver<()>,
+}
+
+type Snapshots = HashMap<String, Map<String, Value>>;
+
+fn load_snapshot() -> Option<Snapshots> {
+    let s = std::fs::read_to_string(SNAPSHOT_PATH).ok()?;
+    serde_json::from_str(&s).ok()
 }
 
 fn device(topic: &str) -> &str {
@@ -40,7 +51,7 @@ fn devices() -> impl Iterator<Item = &'static str> {
 
 impl Lights {
     pub fn connect(cfg: &Config) -> Self {
-        let mut opts = MqttOptions::new("shairport-metadata-rs", &cfg.mqtt_host, cfg.mqtt_port);
+        let mut opts = MqttOptions::new(format!("shairport-metadata-rs-{}", std::process::id()), &cfg.mqtt_host, cfg.mqtt_port);
         opts.set_credentials(&cfg.mqtt_username, &cfg.mqtt_password);
         opts.set_keep_alive(Duration::from_secs(30));
 
@@ -49,6 +60,9 @@ impl Lights {
 
         let sub_client = client.clone();
         let st = shared.clone();
+        let stopping = Arc::new(AtomicBool::new(false));
+        let stop = stopping.clone();
+        let (done_tx, done) = mpsc::channel();
         thread::Builder::new()
             .name("mqtt".into())
             .spawn(move || {
@@ -80,17 +94,44 @@ impl Lights {
                             let dev = device(&p.topic).to_string();
                             st.0.lock().unwrap().curr.insert(dev, payload);
                         }
+                        // requests are sent in order, so everything queued before
+                        // the disconnect has gone out
+                        Ok(Event::Outgoing(Outgoing::Disconnect)) => break,
                         Ok(_) => {}
                         Err(e) => {
+                            if stop.load(Ordering::Relaxed) {
+                                break;
+                            }
                             eprintln!("MQTT connection error: {e}; retrying");
                             thread::sleep(Duration::from_secs(2));
                         }
                     }
                 }
+                let _ = done_tx.send(());
             })
             .expect("spawn mqtt thread");
 
-        Self { client, shared, snapshots: HashMap::new(), have_snapshot: false }
+        let snapshots = load_snapshot();
+        if snapshots.is_some() {
+            println!("Loaded light snapshot from {SNAPSHOT_PATH}");
+        }
+        Self {
+            client,
+            shared,
+            have_snapshot: snapshots.is_some(),
+            snapshots: snapshots.unwrap_or_default(),
+            stopping,
+            done,
+        }
+    }
+
+    /// Flush queued publishes and disconnect, waiting at most `timeout`.
+    pub fn shutdown(self, timeout: Duration) {
+        self.stopping.store(true, Ordering::Relaxed);
+        let _ = self.client.try_disconnect();
+        if self.done.recv_timeout(timeout).is_err() {
+            eprintln!("MQTT did not flush within {timeout:?}");
+        }
     }
 
     fn publish(&self, topic: &str, payload: &Value) {
@@ -141,11 +182,15 @@ impl Lights {
             }
             self.snapshots.insert(dev.to_string(), snap);
         }
+        if let Err(e) = std::fs::write(SNAPSHOT_PATH, serde_json::to_string(&self.snapshots).unwrap()) {
+            eprintln!("Failed to save light snapshot: {e}");
+        }
     }
 
     /// Push the saved snapshot back; OFF devices only get turned off.
     pub fn restore_states(&mut self) {
         self.have_snapshot = false;
+        let _ = std::fs::remove_file(SNAPSHOT_PATH);
         if self.snapshots.is_empty() {
             println!("No snapshots to restore.");
             return;

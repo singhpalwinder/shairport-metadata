@@ -10,3 +10,4 @@ output
 .venv
 sun_times.json
 sun_times.json.tmp
+light_snapshot.json

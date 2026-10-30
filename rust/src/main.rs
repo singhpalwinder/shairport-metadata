@@ -136,19 +136,7 @@ impl App {
             }
 
             // stream end/flush, client disconnect, playback inactive: any ends the session
-            ("ssnc", code @ ("pend" | "pfls" | "disc" | "aend")) => {
-                let t = &self.track;
-                if self.lights.has_snapshot() || t.ready || t.album.is_some() || t.image.is_some() {
-                    if self.lights.has_snapshot() {
-                        println!("↩️ Restoring light states...");
-                        self.lights.restore_states();
-                    }
-                    println!("🧼 Stream reset: {code}");
-                    self.track = TrackState::default();
-                    matrix::clear_artwork(&self.http, &self.matrix_host);
-                    println!("{{}}");
-                }
-            }
+            ("ssnc", code @ ("pend" | "pfls" | "disc" | "aend")) => self.end_session(code),
 
             _ => {}
         }
@@ -164,6 +152,21 @@ impl App {
                 self.track.image = Some(art);
                 self.track.sent = true;
             }
+        }
+    }
+
+    /// Restore lights and clear the matrix; no-op if no session is active.
+    fn end_session(&mut self, reason: &str) {
+        let t = &self.track;
+        if self.lights.has_snapshot() || t.ready || t.album.is_some() || t.image.is_some() {
+            if self.lights.has_snapshot() {
+                println!("↩️ Restoring light states...");
+                self.lights.restore_states();
+            }
+            println!("🧼 Stream reset: {reason}");
+            self.track = TrackState::default();
+            matrix::clear_artwork(&self.http, &self.matrix_host);
+            println!("{{}}");
         }
     }
 
@@ -221,19 +224,19 @@ fn main() {
     };
 
     let mut reader = MetadataReader::new(BufReader::with_capacity(1 << 20, pipe));
-    loop {
+    let reason = loop {
         match reader.next_item() {
             Ok(Some(item)) => app.handle(item),
-            Ok(None) => {
-                eprintln!("metadata pipe closed; exiting");
-                std::process::exit(1);
-            }
-            Err(e) => {
-                eprintln!("error reading metadata pipe: {e}");
-                std::process::exit(1);
-            }
+            Ok(None) => break "metadata pipe closed".to_string(),
+            Err(e) => break format!("error reading metadata pipe: {e}"),
         }
-    }
+    };
+
+    // shairport-sync went away (crash/restart): don't leave the lights coloured
+    eprintln!("{reason}; exiting");
+    app.end_session("pipe closed");
+    app.lights.shutdown(Duration::from_secs(3));
+    std::process::exit(1);
 }
 
 #[cfg(test)]
