@@ -1,9 +1,13 @@
+mod audio;
 mod config;
 mod image_proc;
 mod lights;
 mod matrix;
 mod metadata;
+mod font5x7;
 mod sun;
+mod tile;
+mod weather;
 
 use config::Config;
 use image_proc::ImageProcessor;
@@ -16,6 +20,9 @@ use std::time::{Duration, Instant};
 use sun::SunSchedule;
 
 const SNAPSHOT_TIMEOUT: Duration = Duration::from_millis(2500);
+/// AirPlay 2 sometimes reports a client disconnect mid-song while audio keeps playing.
+/// A disconnect only ends the session once the music has been silent this long.
+const DISC_SILENCE: Duration = Duration::from_secs(3);
 
 #[derive(Default)]
 struct TrackState {
@@ -31,6 +38,8 @@ struct TrackState {
 }
 
 struct App {
+    /// A disconnect that will end the session once the audio stops (see DISC_SILENCE).
+    pending_disc: Option<Instant>,
     lights: Lights,
     sun: SunSchedule,
     http: ureq::Agent,
@@ -98,7 +107,21 @@ impl App {
         }
     }
 
+    /// Runs about twice a second, between metadata items.
+    fn tick(&mut self) {
+        if let Some(since) = self.pending_disc {
+            if since.elapsed() >= DISC_SILENCE && !audio::heard_within(DISC_SILENCE) {
+                self.pending_disc = None;
+                self.end_session("disc");
+            }
+        }
+    }
+
     fn handle(&mut self, item: Item) {
+        // Any sign of an active stream cancels a pending disconnect.
+        if matches!(item.code.as_str(), "copl" | "pbeg" | "prsm" | "prgr" | "PICT") {
+            self.pending_disc = None;
+        }
         match (item.typ.as_str(), item.code.as_str()) {
             ("core", "asal") => self.set_album(String::from_utf8_lossy(&item.data).into_owned()),
 
@@ -137,8 +160,18 @@ impl App {
                 }
             }
 
-            // stream end/flush, client disconnect, playback inactive: any ends the session
-            ("ssnc", code @ ("pend" | "pfls" | "disc" | "aend")) => self.end_session(code),
+            ("ssnc", "disc") => {
+                if self.pending_disc.is_none() {
+                    println!("Client disconnected; ending the session once the audio stops");
+                }
+                self.pending_disc = Some(Instant::now());
+            }
+
+            // stream end/flush, playback inactive: either ends the session
+            ("ssnc", code @ ("pend" | "pfls" | "aend")) => {
+                self.pending_disc = None;
+                self.end_session(code)
+            }
 
             _ => {}
         }
@@ -228,6 +261,14 @@ fn send_one(path: &str, matrix_host: &str) -> ! {
 
 fn main() {
     let args: Vec<String> = std::env::args().collect();
+    if args.get(1).map(String::as_str) == Some("weather-preview") {
+        let path = args.get(2).map(String::as_str).unwrap_or("weather-preview.png");
+        match weather::preview(path) {
+            Ok(()) => println!("wrote {path}"),
+            Err(e) => eprintln!("preview failed: {e}"),
+        }
+        std::process::exit(0);
+    }
     if args.get(1).map(String::as_str) == Some("send") {
         let Some(path) = args.get(2) else {
             eprintln!("usage: shairport-metadata send <image>");
@@ -241,6 +282,11 @@ fn main() {
         eprintln!("config error: {e}");
         std::process::exit(1);
     });
+
+    // Spectrum bars run on their own thread, fed by the ALSA tap (see README).
+    audio::spawn(cfg.matrix_host.clone());
+    // Weather for the idle clock, from Home Assistant.
+    weather::spawn(cfg.ha_url.clone(), cfg.ha_token.clone(), cfg.matrix_host.clone());
 
     let pipe = File::open(&cfg.pipe_path).unwrap_or_else(|e| {
         eprintln!("cannot open {}: {e}", cfg.pipe_path);
@@ -256,15 +302,37 @@ fn main() {
             .into(),
         matrix_host: cfg.matrix_host.clone(),
         track: TrackState::default(),
+        pending_disc: None,
     };
 
-    let mut reader = MetadataReader::new(BufReader::with_capacity(1 << 20, pipe));
+    // Read the pipe on its own thread so the main loop can also run timers (tick).
+    let (tx, rx) = std::sync::mpsc::channel::<Result<Item, String>>();
+    std::thread::Builder::new()
+        .name("metadata".into())
+        .spawn(move || {
+            let mut reader = MetadataReader::new(BufReader::with_capacity(1 << 20, pipe));
+            loop {
+                let msg = match reader.next_item() {
+                    Ok(Some(item)) => Ok(item),
+                    Ok(None) => Err("metadata pipe closed".to_string()),
+                    Err(e) => Err(format!("error reading metadata pipe: {e}")),
+                };
+                let done = msg.is_err();
+                if tx.send(msg).is_err() || done {
+                    return;
+                }
+            }
+        })
+        .expect("spawn metadata thread");
+
     let reason = loop {
-        match reader.next_item() {
-            Ok(Some(item)) => app.handle(item),
-            Ok(None) => break "metadata pipe closed".to_string(),
-            Err(e) => break format!("error reading metadata pipe: {e}"),
+        match rx.recv_timeout(Duration::from_millis(500)) {
+            Ok(Ok(item)) => app.handle(item),
+            Ok(Err(reason)) => break reason,
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
+            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break "metadata reader stopped".to_string(),
         }
+        app.tick();
     };
 
     // shairport-sync went away (crash/restart): don't leave the lights coloured

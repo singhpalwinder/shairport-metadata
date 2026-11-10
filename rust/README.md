@@ -49,3 +49,21 @@ Merging to `main` runs `cargo test`, then `.github/workflows/deploy.yml` SSHes t
 `ci-deploy` key, which can only run `/usr/local/lib/deploy.d/shairport-metadata`. That handler builds the
 commit in `/opt/shairport-metadata` (only if it is already on `origin/main`), restarts
 `shairport-metadata-rs.service`, and restores the previous binary if the service fails to start.
+
+## Spectrum bars
+
+The matrix's now-playing view shows 7 bars driven by the music. Pieces:
+
+- `audio-tap` (src/bin): started by ALSA's `file` plugin with the stream's rate,
+  channels and format; forwards the PCM to `127.0.0.1:5555` over UDP. It never
+  blocks, so playback is unaffected if the backend is down.
+- `audio.rs`: FFT of the last 2048 samples ~30 times a second, 7 log-spaced bands
+  (50 Hz to 14 kHz), each scaled against its own recent peak, sent to the board as
+  `"AL" 7 l0..l6` on UDP 9091. Silent for over a second: it stops sending.
+- `setup-audio-tap.sh`: one-time Pi setup that routes shairport-sync through the
+  tap (`ssh pi5 'bash -s' < rust/setup-audio-tap.sh`, `--undo` to revert).
+
+| Var | |
+|---|---|
+| `AUDIO_TAP_PORT` | optional, default `5555` |
+| `AUDIO_DELAY_MS` | optional, default `150`; delays the bars to line up with what you hear |
