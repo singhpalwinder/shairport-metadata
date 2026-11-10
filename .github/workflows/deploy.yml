@@ -1,0 +1,64 @@
+name: Deploy
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'rust/**'
+      - '.github/workflows/deploy.yml'
+  workflow_dispatch:
+
+concurrency:
+  group: deploy-shairport-metadata
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: Test
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: rust
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v5
+
+      - name: Install Rust
+        run: rustup update stable --no-self-update && rustup default stable
+
+      - name: Cargo Test
+        run: cargo test --locked
+
+  deploy:
+    name: Deploy to pi5
+    needs: test
+    runs-on: ubuntu-latest
+    environment: main
+    env:
+      SSH_HOST: ${{ secrets.SSH_HOST }}
+      SSH_PORT: ${{ secrets.SSH_PORT }}
+      SSH_USER: ${{ secrets.SSH_USER }}
+    steps:
+      - name: Configure SSH
+        env:
+          SSH_PRIVATE_KEY: ${{ secrets.SSH_PRIVATE_KEY }}
+          SSH_KNOWN_HOSTS: ${{ secrets.SSH_KNOWN_HOSTS }}
+        run: |
+          umask 077
+          mkdir -p ~/.ssh
+          printf '%s\n' "$SSH_PRIVATE_KEY" > ~/.ssh/deploy_key
+          printf '%s\n' "$SSH_KNOWN_HOSTS" > ~/.ssh/known_hosts
+
+      # The ci-deploy key is pinned to pi5's deploy-dispatch; the handler only builds commits already on origin/main.
+      - name: Build & Restart on pi5
+        run: |
+          ssh -i ~/.ssh/deploy_key -p "$SSH_PORT" -o BatchMode=yes -o ServerAliveInterval=30 "$SSH_USER@$SSH_HOST" \
+            "shairport-metadata deploy $GITHUB_SHA"
+
+      - name: Verify Version
+        run: |
+          v=$(ssh -i ~/.ssh/deploy_key -p "$SSH_PORT" -o BatchMode=yes "$SSH_USER@$SSH_HOST" "shairport-metadata version")
+          [ "$v" = "$GITHUB_SHA" ] && echo "pi5 running $v" || { echo "pi5 reports $v, expected $GITHUB_SHA"; exit 1; }

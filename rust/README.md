@@ -42,3 +42,10 @@ Roll back:
 
     sudo systemctl disable --now shairport-metadata-rs.service
     sudo systemctl enable --now shairport-metadata.service
+
+## Deploy
+
+Merging to `main` runs `cargo test`, then `.github/workflows/deploy.yml` SSHes to pi5 with the shared
+`ci-deploy` key, which can only run `/usr/local/lib/deploy.d/shairport-metadata`. That handler builds the
+commit in `/opt/shairport-metadata` (only if it is already on `origin/main`), restarts
+`shairport-metadata-rs.service`, and restores the previous binary if the service fails to start.
