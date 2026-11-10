@@ -18,6 +18,8 @@ permissions:
 jobs:
   test:
     name: Test
+    # Only in this repo: forks have no pi5 or secrets, and must never try to deploy.
+    if: github.repository == 'singhpalwinder/shairport-metadata'
     runs-on: ubuntu-latest
     defaults:
       run:
@@ -35,6 +37,7 @@ jobs:
   deploy:
     name: Deploy to pi5
     needs: test
+    if: github.repository == 'singhpalwinder/shairport-metadata'
     runs-on: ubuntu-latest
     environment: main
     env:
