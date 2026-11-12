@@ -316,6 +316,20 @@ struct Client {
     /// An Azure refresh token that was rejected; don't keep hammering Bose with it.
     rejected_refresh: Option<String>,
     name: Option<String>,
+    /// Since when the soundbar has been unreachable; problems are logged once, not per retry.
+    down_since: Option<Instant>,
+    /// Last token problem logged, so a lasting one isn't repeated every retry.
+    token_trouble: Option<String>,
+}
+
+/// "45s", "12 min", "3 h 5 min"
+fn human(d: Duration) -> String {
+    let s = d.as_secs();
+    match s {
+        0..60 => format!("{s}s"),
+        60..3600 => format!("{} min", s / 60),
+        _ => format!("{} h {} min", s / 3600, s % 3600 / 60),
+    }
 }
 
 impl Client {
@@ -374,10 +388,13 @@ impl Client {
     /// A token with some life left, refreshing it first if it's close to expiry.
     /// Err(wait) if there is none; the caller retries after `wait`.
     fn token(&mut self, force_refresh: bool) -> Result<TokenFile, Duration> {
-        let tok = TokenFile::load(&self.token_path).map_err(|e| {
-            eprintln!("bose: {e}");
-            Duration::from_secs(300)
-        })?;
+        let tok = match TokenFile::load(&self.token_path) {
+            Ok(t) => t,
+            Err(e) => {
+                self.trouble(format!("{e} (soundbar now-playing is off until it's there)"));
+                return Err(Duration::from_secs(300));
+            }
+        };
         let left = tok.seconds_left();
         if !force_refresh && left > REFRESH_BEFORE_S {
             return Ok(tok);
@@ -392,6 +409,7 @@ impl Client {
                     eprintln!("bose: could not save refreshed token to {}: {e}", self.token_path);
                 }
                 println!("bose: token refreshed, valid for {} min", new.seconds_left() / 60);
+                self.token_trouble = None;
                 Ok(new)
             }
             Err(e) => {
@@ -403,10 +421,18 @@ impl Client {
                     );
                     self.rejected_refresh = tok.azure_refresh_token.clone();
                 } else {
-                    eprintln!("bose: token refresh failed, will retry: {e}");
+                    self.trouble(format!("token refresh failed, will keep retrying: {e}"));
                 }
                 if left > 60 { Ok(tok) } else { Err(Duration::from_secs(60)) }
             }
+        }
+    }
+
+    /// Log a token problem unless it's the one already logged.
+    fn trouble(&mut self, msg: String) {
+        if self.token_trouble.as_ref() != Some(&msg) {
+            eprintln!("bose: {msg}");
+            self.token_trouble = Some(msg);
         }
     }
 
@@ -453,10 +479,13 @@ impl Client {
                         }
                         Some("/system/info") if response && status == 200 => {
                             let name = m["body"]["name"].as_str().unwrap_or("soundbar").to_string();
-                            if self.name.as_ref() != Some(&name) {
-                                println!("bose: connected to {name} ({})", m["body"]["productName"].as_str().unwrap_or("?"));
-                                self.name = Some(name);
+                            let product = m["body"]["productName"].as_str().unwrap_or("?");
+                            if let Some(since) = self.down_since.take() {
+                                println!("bose: reconnected to {name} after {} away", human(since.elapsed()));
+                            } else if self.name.as_ref() != Some(&name) {
+                                println!("bose: connected to {name} ({product})");
                             }
+                            self.name = Some(name);
                         }
                         Some(r) if response && status != 200 => eprintln!("bose: {r} failed: {}", m["error"]),
                         _ => {}
@@ -508,7 +537,6 @@ impl Client {
     fn run(mut self) {
         let mut backoff = Duration::from_secs(2);
         let mut force_refresh = false;
-        let mut failing = false;
         loop {
             let token = match self.token(force_refresh) {
                 Ok(t) => t,
@@ -537,17 +565,15 @@ impl Client {
                     backoff = (backoff * 2).min(MAX_BACKOFF);
                 }
                 SessionEnd::Failed(e) => {
-                    if !failing || backoff >= MAX_BACKOFF {
-                        eprintln!("bose: {e}; reconnecting");
+                    if self.down_since.is_none() {
+                        eprintln!("bose: {e}; retrying quietly until it's back");
+                        self.down_since = Some(Instant::now());
                     }
-                    failing = true;
                     self.tracker.update(None, Instant::now());
                     self.idle(backoff);
                     backoff = (backoff * 2).min(MAX_BACKOFF);
-                    continue;
                 }
             }
-            failing = false;
         }
     }
 }
@@ -572,6 +598,8 @@ pub fn spawn(host: String, token_path: String, emit: impl FnMut(Event) -> bool +
         art_cache: None,
         rejected_refresh: None,
         name: None,
+        down_since: None,
+        token_trouble: None,
     };
     std::thread::Builder::new()
         .name("bose".into())
@@ -598,6 +626,13 @@ mod tests {
 
     const ART1: &str = "http://192.168.4.9/AirPlay2/ap2_01794448042.jpg";
     const ART2: &str = "http://192.168.4.9/AirPlay2/ap2_01794448272.jpg";
+
+    #[test]
+    fn human_durations() {
+        assert_eq!(human(Duration::from_secs(45)), "45s");
+        assert_eq!(human(Duration::from_secs(12 * 60 + 5)), "12 min");
+        assert_eq!(human(Duration::from_secs(3 * 3600 + 5 * 60)), "3 h 5 min");
+    }
 
     #[test]
     fn cuts_leftovers_after_the_jpeg() {

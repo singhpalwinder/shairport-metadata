@@ -137,6 +137,11 @@ impl Board {
     }
 }
 
+/// "Music is playing, but not through this Pi" (the Bose soundbar): the board spins
+/// the record and shows the date where the bars would be. Sent about once a second;
+/// the board drops back when it stops arriving.
+pub const PLAYING_ELSEWHERE: &[u8] = b"NP";
+
 pub fn encode(levels: &[u8; BANDS]) -> Vec<u8> {
     let mut p = vec![b'A', b'L', BANDS as u8];
     p.extend_from_slice(levels);
