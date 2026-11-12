@@ -29,6 +29,8 @@ const DISC_SILENCE: Duration = Duration::from_secs(3);
 /// wait this long for the soundbar to report the same pause before handing it the
 /// session, so a normal pause doesn't flash the soundbar's copy of the cover.
 const HANDOVER_WAIT: Duration = Duration::from_secs(2);
+/// How often to tell the board music is playing on the soundbar (see audio::PLAYING_ELSEWHERE).
+const ELSEWHERE_EVERY: Duration = Duration::from_secs(1);
 
 /// Who the current session (matrix artwork + light colour) belongs to.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -71,6 +73,10 @@ struct App {
     bose_now: Option<bose::Track>,
     /// AirPlay ended while the soundbar was playing; see HANDOVER_WAIT.
     pending_handover: Option<Instant>,
+    /// For the playing-elsewhere heartbeat to the board.
+    udp: Option<std::net::UdpSocket>,
+    board: audio::Board,
+    last_elsewhere: Option<Instant>,
 }
 
 fn image_mime(data: &[u8]) -> &'static str {
@@ -135,6 +141,17 @@ impl App {
 
     /// Runs about twice a second, between metadata items.
     fn tick(&mut self) {
+        // No audio reaches the Pi when only the soundbar plays, so no spectrum packets
+        // keep the record spinning: tell the board directly.
+        if self.owner == Some(Source::Soundbar)
+            && self.bose_now.is_some()
+            && self.last_elsewhere.is_none_or(|t| t.elapsed() >= ELSEWHERE_EVERY)
+        {
+            self.last_elsewhere = Some(Instant::now());
+            if let Some(sock) = &self.udp {
+                self.board.send(sock, audio::PLAYING_ELSEWHERE);
+            }
+        }
         if let Some(since) = self.pending_disc {
             if since.elapsed() >= DISC_SILENCE && !audio::heard_within(DISC_SILENCE) {
                 self.pending_disc = None;
@@ -463,6 +480,9 @@ fn main() {
         owner: None,
         bose_now: None,
         pending_handover: None,
+        udp: std::net::UdpSocket::bind("0.0.0.0:0").inspect_err(|e| eprintln!("udp socket: {e}")).ok(),
+        board: audio::Board::new(&cfg.matrix_host),
+        last_elsewhere: None,
     };
 
     // Read the pipe on its own thread so the main loop can also run timers (tick).
