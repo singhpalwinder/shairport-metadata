@@ -3,6 +3,8 @@
 Drop-in replacement for `shairport-metadata.py`: reads the shairport-sync
 metadata pipe, sets the zigbee2mqtt lights to the artwork's dominant colour
 (only between sunset and sunrise) and sends a 32x32 RGB565 frame to the matrix.
+It can also follow a Bose soundbar, so the same happens for music sent straight
+to the soundbar (see [Bose soundbar](#bose-soundbar)).
 
 Differences from the Python version:
 
@@ -67,3 +69,42 @@ The matrix's now-playing view shows 7 bars driven by the music. Pieces:
 |---|---|
 | `AUDIO_TAP_PORT` | optional, default `5555` |
 | `AUDIO_DELAY_MS` | optional, default `150`; delays the bars to line up with what you hear |
+
+## Bose soundbar
+
+With `BOSE_HOST` set, the matrix artwork and light colour also follow what a Bose
+soundbar is playing (Bose Music / "ECO2" products: Smart Soundbars, Lifestyle Ultra),
+for music sent straight to it: AirPlay to the soundbar, Spotify Connect, and so on.
+AirPlay to the Pi wins when both are playing, since it also drives the spectrum bars.
+If the Pi's stream ends while the soundbar keeps playing, the soundbar takes over.
+
+How it works (`bose.rs`): the soundbar has a local WebSocket API on port 8082 (TLS
+with a self-signed device cert, subprotocol `eco2`), the same one the Bose app uses.
+The backend subscribes to `/content/nowPlaying` and the soundbar pushes every change.
+Bursts (a skip sends several half-empty states) are settled before acting, and a pause
+only ends the session after 4s. AirPlay covers come from the soundbar over HTTP.
+
+The API needs a JWT from your Bose account. It lasts 8 hours; `bose_auth.rs` renews it
+with the saved refresh token (Azure B2C, then Bose's id service) and rewrites the token
+file, so the password is only needed once:
+
+    # anywhere with Python; writes the token file
+    python3 -m venv /tmp/bose-venv && /tmp/bose-venv/bin/pip install pybose requests PyJWT zeroconf
+    /tmp/bose-venv/bin/python rust/bose-login.py /tmp/bose_token.json
+    scp /tmp/bose_token.json pi5:/opt/shairport-metadata/bose_token.json   # must stay writable by the service user
+
+    # /etc/shairport-metadata.env
+    BOSE_HOST=bose-ls-ultra-soundbar.lan   # any name or IP for it; find it with: dns-sd -B _bose-passport._tcp
+
+If the log says the refresh was rejected (password change, revoked sessions), run
+`bose-login.py` again. Everything else keeps working meanwhile.
+
+| Var | |
+|---|---|
+| `BOSE_HOST` | optional; soundbar IP or hostname. Unset: feature off |
+| `BOSE_TOKEN_PATH` | optional, default `/opt/shairport-metadata/bose_token.json` |
+
+Checking it by hand:
+
+    BOSE_HOST=... ./shairport-metadata bose-watch     # print what the soundbar reports
+    ./shairport-metadata bose-refresh                 # refresh the token now

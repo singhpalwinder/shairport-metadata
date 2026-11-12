@@ -8,6 +8,8 @@ pub const MATRIX_PORT: u16 = 9090;
 pub const SUN_CACHE_PATH: &str = "/opt/shairport-metadata/sun_times.json";
 /// Pre-session light states, kept on disk so a restart mid-session still restores them.
 pub const SNAPSHOT_PATH: &str = "/opt/shairport-metadata/light_snapshot.json";
+/// Token for the Bose soundbar's local API (written by bose-login.py, kept fresh by bose_auth).
+pub const BOSE_TOKEN_PATH: &str = "/opt/shairport-metadata/bose_token.json";
 
 pub const LIGHT_TOPICS: &[&str] = &[
     "zigbee2mqtt/playbar1/set",
@@ -29,6 +31,9 @@ pub struct Config {
     pub ha_token: Option<String>,
     pub pipe_path: String,
     pub matrix_host: String,
+    /// Bose soundbar to follow (IP or hostname); unset turns the feature off.
+    pub bose_host: Option<String>,
+    pub bose_token_path: String,
 }
 
 impl Config {
@@ -50,6 +55,8 @@ impl Config {
             ha_token: env::var("HA_TOKEN").ok().filter(|t| !t.is_empty()),
             pipe_path: env::var("SSNC_PIPE_PATH").unwrap_or_else(|_| "/tmp/shairport-sync-metadata".into()),
             matrix_host: env::var("MATRIX_HOST").unwrap_or_else(|_| "matrix.lan".into()),
+            bose_host: env::var("BOSE_HOST").ok().filter(|h| !h.trim().is_empty()),
+            bose_token_path: env::var("BOSE_TOKEN_PATH").unwrap_or_else(|_| BOSE_TOKEN_PATH.into()),
         })
     }
 }

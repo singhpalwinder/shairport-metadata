@@ -11,3 +11,5 @@ output
 sun_times.json
 sun_times.json.tmp
 light_snapshot.json
+bose_token.json
+bose_token.json.tmp
